@@ -1,0 +1,41 @@
+# Django and REST Framework
+Django==5.0.7
+djangorestframework==3.15.2
+django-cors-headers==4.3.1
+django-filter==24.2
+
+# Database
+psycopg2-binary==2.9.9
+dj-database-url==2.2.0
+
+# Authentication and Security
+djangorestframework-simplejwt==5.3.0
+django-extensions==3.2.3
+
+# Environment variables
+python-decouple==3.8
+
+# PDF Generation
+reportlab==4.2.2
+xhtml2pdf==0.2.16
+
+# Redis (optional)
+redis==5.0.7
+django-redis==5.4.0
+
+# API Documentation
+drf-spectacular==0.27.2
+
+# Testing and Development
+factory-boy==3.3.0
+pytest==8.2.2
+pytest-django==4.8.0
+coverage==7.6.0
+
+# Production requirements
+gunicorn==23.0.0
+whitenoise==6.7.0
+
+# Utilities
+Pillow==10.4.0
+python-dateutil==2.9.0.post0

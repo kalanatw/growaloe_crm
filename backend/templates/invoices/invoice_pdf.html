@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice {{ invoice.invoice_number }}</title>
+    <style>
+        :root {
+            --primary-color: {{ primary_color|default:"#007bff" }};
+            --secondary-color: {{ secondary_color|default:"#6c757d" }};
+        }
+    </style>
+</head>
+<body>
+    {% if show_company_details %}
+    <div class="header">
+        {% if show_logo and company_settings.company_logo %}
+        <div class="logo-container">
+            <img src="{{ company_settings.company_logo.url }}" alt="{{ company_name }}" class="company-logo">
+        </div>
+        {% endif %}
+        <div class="company-name">{{ company_name }}</div>
+        <div>{{ company_address|linebreaks }}</div>
+        <div>
+            Phone: {{ company_phone }}
+            {% if company_email %} | Email: {{ company_email }}{% endif %}
+            {% if company_website %} | Website: {{ company_website }}{% endif %}
+        </div>
+        {% if company_tax_id %}
+        <div>Tax ID: {{ company_tax_id }}</div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="invoice-details">
+        <div class="invoice-info">
+            <div class="invoice-title">INVOICE</div>
+            <table style="border: none;">
+                <tr style="border: none;">
+                    <td style="border: none; font-weight: bold;">Invoice Number:</td>
+                    <td style="border: none;">{{ invoice.invoice_number }}</td>
+                </tr>
+                <tr style="border: none;">
+                    <td style="border: none; font-weight: bold;">Invoice Date:</td>
+                    <td style="border: none;">{{ invoice.invoice_date|date:"F d, Y" }}</td>
+                </tr>
+                {% if invoice.due_date %}
+                <tr style="border: none;">
+                    <td style="border: none; font-weight: bold;">Due Date:</td>
+                    <td style="border: none;">{{ invoice.due_date|date:"F d, Y" }}</td>
+                </tr>
+                {% endif %}
+                <tr style="border: none;">
+                    <td style="border: none; font-weight: bold;">Status:</td>
+                    <td style="border: none;">{{ invoice.status|title }}</td>
+                </tr>
+            </table>
+        </div>
+
+        <div class="bill-to">
+            <div style="font-weight: bold; margin-bottom: 10px;">BILL TO:</div>
+            <div><strong>{{ invoice.shop.name }}</strong></div>
+            <div>{{ invoice.shop.address }}</div>
+            <div>Contact: {{ invoice.shop.contact_person }}</div>
+            <div>Phone: {{ invoice.shop.phone }}</div>
+            {% if invoice.shop.email %}
+            <div>Email: {{ invoice.shop.email }}</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 50%;">Product</th>
+                <th style="width: 15%;">Quantity</th>
+                <th style="width: 15%;">Unit Price</th>
+                <th style="width: 20%;" class="text-right">Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in items %}
+            <tr>
+                <td>
+                    <strong>{{ item.product.name }}</strong><br>
+                    <small>SKU: {{ item.product.sku }}</small>
+                </td>
+                <td>{{ item.quantity }}</td>
+                <td>{{ currency_symbol|default:"$" }}{{ item.unit_price|floatformat:2 }}</td>
+                <td class="text-right">{{ currency_symbol|default:"$" }}{{ item.total_price|floatformat:2 }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="totals">
+        <table style="width: 300px; margin-left: auto; border: none;">
+            <tr style="border: none;">
+                <td style="border: none; font-weight: bold;">Subtotal:</td>
+                <td style="border: none;" class="text-right">{{ currency_symbol|default:"$" }}{{ invoice.subtotal|floatformat:2 }}</td>
+            </tr>
+            {% if invoice.tax_amount and invoice.tax_amount > 0 %}
+            <tr style="border: none;">
+                <td style="border: none; font-weight: bold;">Tax:</td>
+                <td style="border: none;" class="text-right">{{ currency_symbol|default:"$" }}{{ invoice.tax_amount|floatformat:2 }}</td>
+            </tr>
+            {% endif %}
+            {% if invoice.discount_amount and invoice.discount_amount > 0 %}
+            <tr style="border: none;">
+                <td style="border: none; font-weight: bold;">Discount:</td>
+                <td style="border: none;" class="text-right">-{{ currency_symbol|default:"$" }}{{ invoice.discount_amount|floatformat:2 }}</td>
+            </tr>
+            {% endif %}
+            <tr style="border: none;" class="total-row">
+                <td style="border: none; font-weight: bold; font-size: 16px;">Total:</td>
+                <td style="border: none; font-weight: bold; font-size: 16px;" class="text-right">{{ currency_symbol|default:"$" }}{{ invoice.net_total|floatformat:2 }}</td>
+            </tr>
+        </table>
+    </div>
+
+    {% if invoice.notes %}
+    <div style="margin-top: 30px;">
+        <strong>Notes:</strong><br>
+        {{ invoice.notes|linebreaks }}
+    </div>
+    {% endif %}
+
+    {% if invoice.terms_conditions %}
+    <div style="margin-top: 20px;">
+        <strong>Terms & Conditions:</strong><br>
+        {{ invoice.terms_conditions|linebreaks }}
+    </div>
+    {% endif %}
+
+    <div class="footer">
+        {% if footer_text %}
+            {{ footer_text|linebreaks }}
+        {% else %}
+            <p>Thank you for your business!</p>
+            <p>This is a computer-generated invoice and does not require a signature.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
