@@ -158,6 +158,89 @@ export const transactionService = {
   getTransactionSummary: async () => {
     return apiClient.get('/sales/transactions/summary/');
   },
+
+  getOutstandingInvoices: async (shopId: number): Promise<{
+    shop: { id: number; name: string; contact_person: string };
+    invoices: Array<{
+      id: number;
+      invoice_number: string;
+      invoice_date: string;
+      net_total: number;
+      paid_amount: number;
+      balance_due: number;
+      status: string;
+      due_date?: string;
+    }>;
+    total_outstanding: number;
+  }> => {
+    return apiClient.get(`/sales/transactions/outstanding_invoices/?shop_id=${shopId}`);
+  },
+
+  getTotalDebits: async (): Promise<{
+    total_debits: number;
+    invoices_count: number;
+    by_status: { pending: number; partial: number; overdue: number };
+    by_shop: Array<{
+      shop__id: number;
+      shop__name: string;
+      outstanding_amount: number;
+      invoices_count: number;
+    }>;
+  }> => {
+    return apiClient.get('/sales/transactions/total_debits/');
+  },
+
+  settleInvoice: async (data: {
+    invoice_id: number;
+    amount: number;
+    payment_method: string;
+    reference_number?: string;
+    notes?: string;
+  }): Promise<{
+    transaction_id: number;
+    invoice: {
+      id: number;
+      invoice_number: string;
+      previous_balance: number;
+      payment_amount: number;
+      new_balance: number;
+      status: string;
+    };
+    message: string;
+  }> => {
+    return apiClient.post('/sales/transactions/settle_invoice/', data);
+  },
+
+  settleInvoiceMultiPayment: async (data: {
+    invoice_id: number;
+    payments: Array<{
+      payment_method: string;
+      amount: number;
+      reference_number?: string;
+      bank_name?: string;
+      cheque_date?: string;
+      notes?: string;
+    }>;
+    notes?: string;
+  }): Promise<{
+    settlement_id: number;
+    invoice: {
+      id: number;
+      invoice_number: string;
+      previous_balance: number;
+      total_payment_amount: number;
+      new_balance: number;
+      status: string;
+    };
+    payments: Array<{
+      payment_method: string;
+      amount: number;
+      reference_number: string;
+    }>;
+    message: string;
+  }> => {
+    return apiClient.post('/sales/transactions/settle_invoice_multi_payment/', data);
+  },
 };
 
 export const analyticsService = {

@@ -10,6 +10,7 @@ import {
   LogOut,
   X,
   UserPlus,
+  Receipt,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -26,6 +27,7 @@ const navigation = [
   { name: 'Create Invoice', href: '/invoices/create', icon: FileText },
   { name: 'Invoice History', href: '/invoices', icon: FileText },
   { name: 'Shops', href: '/shops', icon: Users },
+  { name: 'Invoice Settlement', href: '/invoice-settlement', icon: Receipt },
   { name: 'Transactions', href: '/transactions', icon: CreditCard },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
 ];

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from decimal import Decimal
-from .models import Invoice, InvoiceItem, Transaction, Return
+from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment
 from products.models import Product, SalesmanStock
 
 User = get_user_model()
@@ -268,3 +268,86 @@ class SalesPerformanceSerializer(serializers.Serializer):
     total_invoices = serializers.IntegerField()
     average_sale = serializers.DecimalField(max_digits=15, decimal_places=2)
     commission_earned = serializers.DecimalField(max_digits=15, decimal_places=2)
+
+
+class SettlementPaymentSerializer(serializers.ModelSerializer):
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    
+    class Meta:
+        model = SettlementPayment
+        fields = [
+            'id', 'payment_method', 'payment_method_display', 'amount', 
+            'reference_number', 'bank_name', 'cheque_date', 'notes', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'payment_method_display']
+
+
+class InvoiceSettlementSerializer(serializers.ModelSerializer):
+    payments = SettlementPaymentSerializer(many=True, read_only=True)
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    
+    class Meta:
+        model = InvoiceSettlement
+        fields = [
+            'id', 'invoice', 'invoice_number', 'settlement_date', 'total_amount',
+            'notes', 'created_by', 'created_by_name', 'payments', 'created_at'
+        ]
+        read_only_fields = ['id', 'settlement_date', 'created_at', 'invoice_number', 'created_by_name']
+
+
+class MultiPaymentSettlementSerializer(serializers.Serializer):
+    """Serializer for creating a settlement with multiple payment methods"""
+    invoice_id = serializers.IntegerField()
+    payments = serializers.ListField(child=serializers.DictField(), min_length=1)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate_invoice_id(self, value):
+        try:
+            invoice = Invoice.objects.get(id=value)
+            if invoice.balance_due <= 0:
+                raise serializers.ValidationError("Invoice is already fully paid")
+            return value
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError("Invoice not found")
+    
+    def validate_payments(self, value):
+        total_amount = Decimal('0')
+        valid_payment_methods = [choice[0] for choice in SettlementPayment.PAYMENT_METHODS]
+        
+        for payment in value:
+            # Validate required fields
+            if 'payment_method' not in payment or 'amount' not in payment:
+                raise serializers.ValidationError("Each payment must have payment_method and amount")
+            
+            # Validate payment method
+            if payment['payment_method'] not in valid_payment_methods:
+                raise serializers.ValidationError(f"Invalid payment method: {payment['payment_method']}")
+            
+            # Validate amount
+            try:
+                amount = Decimal(str(payment['amount']))
+                if amount <= 0:
+                    raise serializers.ValidationError("Payment amount must be greater than zero")
+                total_amount += amount
+            except (ValueError, TypeError):
+                raise serializers.ValidationError("Invalid payment amount")
+        
+        return value
+    
+    def validate(self, data):
+        invoice_id = data['invoice_id']
+        payments = data['payments']
+        
+        try:
+            invoice = Invoice.objects.get(id=invoice_id)
+            total_payment_amount = sum(Decimal(str(p['amount'])) for p in payments)
+            
+            if total_payment_amount > invoice.balance_due:
+                raise serializers.ValidationError(
+                    f"Total payment amount ({total_payment_amount}) exceeds outstanding balance ({invoice.balance_due})"
+                )
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError("Invoice not found")
+        
+        return data

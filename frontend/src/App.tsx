@@ -18,6 +18,7 @@ import { ShopDetailPage } from './pages/ShopDetailPage';
 import { TransactionsPage } from './pages/TransactionsPage';
 import { SalesmenPage } from './pages/SalesmenPage';
 import { CreateSalesmanPage } from './pages/CreateSalesmanPage';
+import { InvoiceSettlementPage } from './pages/InvoiceSettlementPage';
 import { USER_ROLES } from './config/constants';
 
 const queryClient = new QueryClient({
@@ -131,6 +132,14 @@ function App() {
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER]}>
                       <CreateSalesmanPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/invoice-settlement"
+                  element={
+                    <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
+                      <InvoiceSettlementPage />
                     </ProtectedRoute>
                   }
                 />

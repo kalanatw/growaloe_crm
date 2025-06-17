@@ -10,11 +10,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 
-from .models import Invoice, InvoiceItem, Transaction, Return
+from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment
 from .serializers import (
     InvoiceSerializer, InvoiceCreateSerializer, InvoiceItemSerializer,
     TransactionSerializer, ReturnSerializer, InvoiceSummarySerializer,
-    SalesPerformanceSerializer
+    SalesPerformanceSerializer, InvoiceSettlementSerializer, 
+    SettlementPaymentSerializer, MultiPaymentSettlementSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 from products.models import SalesmanStock, StockMovement
@@ -183,198 +184,180 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def generate_pdf(self, request, pk=None):
         """
-        Generate PDF for an invoice using ReportLab
+        Generate Receipt-style PDF for portable bill printer
         """
         from django.http import HttpResponse
-        from reportlab.lib.pagesizes import letter, A4
-        from reportlab.lib import colors
-        from reportlab.lib.units import inch
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.units import inch, mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.colors import HexColor
+        from reportlab.lib import colors
         import io
         from decimal import Decimal
         from core.models import CompanySettings
         
         invoice = self.get_object()
         
-        # Get company settings for customization
+        # Get company settings
         company_settings = CompanySettings.get_settings()
+        currency = company_settings.currency_symbol
         
         try:
-            # Create PDF buffer
+            # Create PDF buffer - smaller page size for receipt printer
             buffer = io.BytesIO()
             
-            # Create the PDF document
+            # Receipt-style page size (80mm width x variable height)
+            page_width = 80 * mm
+            page_height = 297 * mm  # A4 height for now, will adjust based on content
+            
             doc = SimpleDocTemplate(
                 buffer,
-                pagesize=A4,
-                rightMargin=72,
-                leftMargin=72,
-                topMargin=72,
-                bottomMargin=18
+                pagesize=(page_width, page_height),
+                rightMargin=5 * mm,
+                leftMargin=5 * mm,
+                topMargin=5 * mm,
+                bottomMargin=5 * mm
             )
             
-            # Get styles
+            # Custom styles for receipt printer
             styles = getSampleStyleSheet()
             
-            # Custom styles with company colors
-            primary_color = HexColor(company_settings.primary_color)
-            secondary_color = HexColor(company_settings.secondary_color)
-            
-            title_style = ParagraphStyle(
-                'CustomTitle',
-                parent=styles['Heading1'],
-                fontSize=24,
-                spaceAfter=30,
-                textColor=primary_color,
-                alignment=TA_CENTER
-            )
-            
-            heading_style = ParagraphStyle(
-                'CustomHeading',
-                parent=styles['Heading2'],
-                fontSize=14,
-                textColor=primary_color,
-                spaceAfter=12
-            )
-            
-            normal_style = ParagraphStyle(
-                'CustomNormal',
+            # Header style - bold and centered
+            header_style = ParagraphStyle(
+                'ReceiptHeader',
                 parent=styles['Normal'],
                 fontSize=10,
-                spaceAfter=6
+                fontName='Helvetica-Bold',
+                alignment=TA_CENTER,
+                spaceAfter=2
             )
             
-            # Story to hold all content
+            # Sub-header style
+            subheader_style = ParagraphStyle(
+                'ReceiptSubHeader',
+                parent=styles['Normal'],
+                fontSize=8,
+                fontName='Helvetica',
+                alignment=TA_CENTER,
+                spaceAfter=1
+            )
+            
+            # Normal text style
+            normal_style = ParagraphStyle(
+                'ReceiptNormal',
+                parent=styles['Normal'],
+                fontSize=8,
+                fontName='Helvetica',
+                alignment=TA_LEFT,
+                spaceAfter=1
+            )
+            
+            # Amount style - right aligned
+            amount_style = ParagraphStyle(
+                'ReceiptAmount',
+                parent=styles['Normal'],
+                fontSize=8,
+                fontName='Helvetica',
+                alignment=TA_RIGHT,
+                spaceAfter=1
+            )
+            
+            # Total style - bold
+            total_style = ParagraphStyle(
+                'ReceiptTotal',
+                parent=styles['Normal'],
+                fontSize=9,
+                fontName='Helvetica-Bold',
+                alignment=TA_RIGHT,
+                spaceAfter=2
+            )
+            
+            # Story to hold content
             story = []
             
             # Company Header
-            if company_settings.show_company_details:
-                company_name = Paragraph(company_settings.company_name, title_style)
-                story.append(company_name)
-                
-                if company_settings.company_address:
-                    address = Paragraph(company_settings.company_address, normal_style)
-                    story.append(address)
-                
-                contact_info = []
-                if company_settings.company_phone:
-                    contact_info.append(f"Phone: {company_settings.company_phone}")
-                if company_settings.company_email:
-                    contact_info.append(f"Email: {company_settings.company_email}")
-                if company_settings.company_website:
-                    contact_info.append(f"Website: {company_settings.company_website}")
-                
-                if contact_info:
-                    contact_para = Paragraph(" | ".join(contact_info), normal_style)
-                    story.append(contact_para)
-                
-                story.append(Spacer(1, 20))
+            story.append(Paragraph(company_settings.company_name, header_style))
+            if company_settings.company_address:
+                story.append(Paragraph(company_settings.company_address, subheader_style))
+            if company_settings.company_phone:
+                story.append(Paragraph(f"Tel: {company_settings.company_phone}", subheader_style))
             
-            # Invoice Title
-            invoice_title = Paragraph(f"INVOICE #{invoice.invoice_number}", heading_style)
-            story.append(invoice_title)
-            story.append(Spacer(1, 12))
+            # Separator line
+            story.append(Spacer(1, 3))
+            story.append(Paragraph("="*30, subheader_style))
+            story.append(Spacer(1, 3))
             
-            # Invoice Details Table
-            invoice_data = [
-                ['Invoice Number:', invoice.invoice_number],
-                ['Date:', invoice.invoice_date.strftime('%B %d, %Y')],
-                ['Due Date:', invoice.due_date.strftime('%B %d, %Y') if invoice.due_date else 'N/A'],
-                ['Status:', invoice.status],
-                ['Salesman:', f"{invoice.salesman.user.first_name} {invoice.salesman.user.last_name}" if invoice.salesman.user.first_name else invoice.salesman.name],
-                ['Shop:', invoice.shop.name if invoice.shop else 'N/A'],
-            ]
+            # Invoice details
+            story.append(Paragraph(f"INVOICE #{invoice.invoice_number}", header_style))
+            story.append(Paragraph(f"Date: {invoice.invoice_date.strftime('%d/%m/%Y %H:%M')}", normal_style))
+            story.append(Paragraph(f"Shop: {invoice.shop.name}", normal_style))
+            story.append(Paragraph(f"Salesman: {invoice.salesman.user.first_name or invoice.salesman.name}", normal_style))
             
-            invoice_table = Table(invoice_data, colWidths=[2*inch, 3*inch])
-            invoice_table.setStyle(TableStyle([
-                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-                ('TEXTCOLOR', (0, 0), (0, -1), primary_color),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ]))
+            # Separator
+            story.append(Spacer(1, 2))
+            story.append(Paragraph("-"*30, subheader_style))
+            story.append(Spacer(1, 2))
             
-            story.append(invoice_table)
-            story.append(Spacer(1, 20))
-            
-            # Items Table
-            items_title = Paragraph("Invoice Items", heading_style)
-            story.append(items_title)
-            
-            # Prepare items data
-            items_data = [['Item', 'Quantity', 'Unit Price', 'Salesman Margin', 'Shop Margin', 'Total']]
-            
+            # Items - compact format
             for item in invoice.items.all():
-                currency = company_settings.currency_symbol
-                items_data.append([
-                    item.product.name,
-                    str(item.quantity),
-                    f"{currency}{item.unit_price:.2f}",
-                    f"{item.salesman_margin:.1f}%",
-                    f"{item.shop_margin:.1f}%",
-                    f"{currency}{item.total_price:.2f}"
-                ])
+                # Product name
+                story.append(Paragraph(item.product.name, normal_style))
+                
+                # Quantity x Unit Price = Total
+                item_line = f"{item.quantity} x {currency}{item.unit_price:.2f} = {currency}{item.total_price:.2f}"
+                story.append(Paragraph(item_line, amount_style))
+                
+                story.append(Spacer(1, 1))
             
-            items_table = Table(items_data, colWidths=[2.5*inch, 0.8*inch, 1*inch, 1*inch, 1*inch, 1*inch])
-            items_table.setStyle(TableStyle([
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), secondary_color),
-                ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('INNERGRID', (0, 0), (-1, -1), 0.25, colors.black),
-                ('BOX', (0, 0), (-1, -1), 0.25, colors.black),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ]))
+            # Separator before totals
+            story.append(Paragraph("-"*30, subheader_style))
+            story.append(Spacer(1, 2))
             
-            story.append(items_table)
-            story.append(Spacer(1, 20))
+            # Calculate totals according to new logic
+            # Total Product Price (sum of all item totals)
+            product_total = sum(item.total_price for item in invoice.items.all())
             
-            # Totals Section
-            currency = company_settings.currency_symbol
-            totals_data = [
-                ['Subtotal:', f"{currency}{invoice.subtotal:.2f}"],
-                ['Tax:', f"{currency}{invoice.tax_amount:.2f}"],
-                ['Total Amount:', f"{currency}{invoice.total_amount:.2f}"],
-            ]
+            # Shop margin calculation - get from first item (all items should have same shop margin)
+            items = invoice.items.all()
+            shop_margin_percent = Decimal('0.00')
+            if items.exists():
+                shop_margin_percent = items.first().shop_margin or Decimal('0.00')
             
-            totals_table = Table(totals_data, colWidths=[2*inch, 1.5*inch])
-            totals_table.setStyle(TableStyle([
-                ('FONTNAME', (0, 0), (-1, -2), 'Helvetica'),
-                ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
-                ('TEXTCOLOR', (0, -1), (-1, -1), primary_color),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ]))
+            shop_margin_amount = product_total * (shop_margin_percent / Decimal('100'))
+            after_margin = product_total - shop_margin_amount
             
-            # Right align the totals table
-            totals_table.hAlign = 'RIGHT'
-            story.append(totals_table)
-            story.append(Spacer(1, 30))
+            # Final total with tax and discount
+            final_total = after_margin + invoice.tax_amount - invoice.discount_amount
+            
+            # Show totals
+            story.append(Paragraph(f"Total Products: {currency}{product_total:.2f}", amount_style))
+            
+            if shop_margin_percent > 0:
+                story.append(Paragraph(f"Shop Margin ({shop_margin_percent}%): -{currency}{shop_margin_amount:.2f}", amount_style))
+                story.append(Paragraph(f"After Margin: {currency}{after_margin:.2f}", amount_style))
+            
+            # Only show tax if it's not zero
+            if invoice.tax_amount > 0:
+                story.append(Paragraph(f"Tax: {currency}{invoice.tax_amount:.2f}", amount_style))
+            
+            # Only show discount if it's not zero
+            if invoice.discount_amount > 0:
+                story.append(Paragraph(f"Discount: -{currency}{invoice.discount_amount:.2f}", amount_style))
+            
+            # Final separator
+            story.append(Paragraph("="*30, subheader_style))
+            
+            # Final total
+            story.append(Paragraph(f"TOTAL: {currency}{final_total:.2f}", total_style))
             
             # Footer
-            if company_settings.invoice_footer_text:
-                footer_style = ParagraphStyle(
-                    'Footer',
-                    parent=styles['Normal'],
-                    fontSize=8,
-                    textColor=secondary_color,
-                    alignment=TA_CENTER
-                )
-                footer = Paragraph(company_settings.invoice_footer_text, footer_style)
-                story.append(footer)
+            story.append(Spacer(1, 5))
+            story.append(Paragraph("Thank you for your business!", subheader_style))
+            story.append(Paragraph(f"Status: {invoice.status}", subheader_style))
+            
+            if invoice.due_date:
+                story.append(Paragraph(f"Due: {invoice.due_date.strftime('%d/%m/%Y')}", subheader_style))
             
             # Build PDF
             doc.build(story)
@@ -385,13 +368,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             
             # Create HTTP response
             response = HttpResponse(pdf_data, content_type='application/pdf')
-            response['Content-Disposition'] = f'attachment; filename="invoice_{invoice.invoice_number}.pdf"'
+            response['Content-Disposition'] = f'attachment; filename="receipt_{invoice.invoice_number}.pdf"'
             
             return response
             
         except Exception as e:
             return Response({
-                'error': f'Failed to generate PDF: {str(e)}',
+                'error': f'Failed to generate receipt PDF: {str(e)}',
                 'invoice_id': invoice.id,
                 'invoice_number': invoice.invoice_number
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -806,240 +789,124 @@ class TransactionViewSet(viewsets.ModelViewSet):
         
         return Response(summary)
 
-
-@extend_schema_view(
-    list=extend_schema(
-        summary="List returns",
-        description="Get a paginated list of product returns based on user permissions",
+    @extend_schema(
+        summary="Get outstanding invoices by shop",
+        description="Get list of unpaid or partially paid invoices for a specific shop",
         parameters=[
             OpenApiParameter(
-                name='status',
-                description='Filter by return status',
-                required=False,
-                type=str,
-                enum=['PENDING', 'APPROVED', 'REJECTED']
-            ),
-            OpenApiParameter(
-                name='reason',
-                description='Filter by return reason',
-                required=False,
-                type=str
-            ),
-            OpenApiParameter(
-                name='invoice',
-                description='Filter by invoice ID',
-                required=False,
+                name='shop_id',
+                description='Shop ID to get invoices for',
+                required=True,
                 type=int
-            ),
-            OpenApiParameter(
-                name='product',
-                description='Filter by product ID',
-                required=False,
-                type=int
-            ),
-            OpenApiParameter(
-                name='search',
-                description='Search by invoice number, product name, or reason',
-                required=False,
-                type=str
-            ),
-            OpenApiParameter(
-                name='ordering',
-                description='Order results by field (prefix with - for descending)',
-                required=False,
-                type=str,
-                enum=['return_date', '-return_date', 'quantity_returned', '-quantity_returned', 'created_at', '-created_at']
             )
         ],
-        responses={200: ReturnSerializer(many=True)},
-        tags=['Sales Management']
-    ),
-    create=extend_schema(
-        summary="Create return",
-        description="Create a new product return request",
-        request=ReturnSerializer,
-        responses={
-            201: ReturnSerializer,
-            400: OpenApiResponse(description="Invalid data provided")
-        },
-        tags=['Sales Management']
-    ),
-    retrieve=extend_schema(
-        summary="Get return details",
-        description="Retrieve detailed information about a specific return",
-        responses={
-            200: ReturnSerializer,
-            404: OpenApiResponse(description="Return not found")
-        },
-        tags=['Sales Management']
-    ),
-    update=extend_schema(
-        summary="Update return",
-        description="Update return information",
-        request=ReturnSerializer,
-        responses={
-            200: ReturnSerializer,
-            400: OpenApiResponse(description="Invalid data provided"),
-            404: OpenApiResponse(description="Return not found")
-        },
-        tags=['Sales Management']
-    ),
-    partial_update=extend_schema(
-        summary="Partially update return",
-        description="Partially update return information",
-        request=ReturnSerializer,
-        responses={
-            200: ReturnSerializer,
-            400: OpenApiResponse(description="Invalid data provided"),
-            404: OpenApiResponse(description="Return not found")
-        },
-        tags=['Sales Management']
-    ),
-    destroy=extend_schema(
-        summary="Delete return",
-        description="Cancel/delete a return request",
-        responses={
-            204: OpenApiResponse(description="Return deleted successfully"),
-            404: OpenApiResponse(description="Return not found")
-        },
-        tags=['Sales Management']
-    )
-)
-class ReturnViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing product returns with approval workflow and role-based access
-    """
-    queryset = Return.objects.select_related('original_invoice', 'product', 'created_by').all()
-    serializer_class = ReturnSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['reason', 'original_invoice', 'product', 'approved']
-    search_fields = ['original_invoice__invoice_number', 'product__name', 'reason']
-    ordering_fields = ['quantity', 'created_at', 'updated_at']
-    ordering = ['-created_at']
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
-
-        if user.role == 'SALESMAN':
-            # Salesmen can only see returns for their invoices
-            return queryset.filter(invoice__salesman=user.salesman_profile)
-        elif user.role == 'SHOP':
-            # Shops can see returns for their invoices
-            return queryset.filter(invoice__shop=user.shop_profile)
-        else:
-            # Owners and Developers can see all returns
-            return queryset
-
-    def perform_create(self, serializer):
-        serializer.save(processed_by=self.request.user)
-
-    @extend_schema(
-        summary="Approve return request",
-        description="Approve a pending return request and update stock (Owner/Developer only)",
-        request=None,
         responses={
             200: OpenApiResponse(
-                response=ReturnSerializer,
-                description="Return approved successfully",
+                description="List of outstanding invoices",
                 examples=[
                     OpenApiExample(
-                        "Approve Return Response",
+                        "Outstanding Invoices Response",
                         value={
-                            "id": 1,
-                            "status": "APPROVED",
-                            "invoice": 1,
-                            "product": 1,
-                            "quantity_returned": 5,
-                            "reason": "Damaged product",
-                            "return_date": "2025-06-01",
-                            "processed_by": 1
+                            "invoices": [
+                                {
+                                    "id": 1,
+                                    "invoice_number": "INV-2025-0001",
+                                    "invoice_date": "2025-06-17T10:00:00Z",
+                                    "net_total": 1500.00,
+                                    "paid_amount": 500.00,
+                                    "balance_due": 1000.00,
+                                    "status": "partial"
+                                }
+                            ],
+                            "total_outstanding": 1000.00
                         }
                     )
                 ]
             ),
-            400: OpenApiResponse(description="Only pending returns can be approved"),
-            403: OpenApiResponse(description="Permission denied"),
-            404: OpenApiResponse(description="Return not found")
+            404: OpenApiResponse(description="Shop not found")
         },
         tags=['Sales Management']
     )
-    @action(detail=True, methods=['patch'])
-    def approve(self, request, pk=None):
+    @action(detail=False, methods=['get'])
+    def outstanding_invoices(self, request):
         """
-        Approve a return request
+        Get outstanding invoices for a specific shop
         """
-        return_obj = self.get_object()
-        
-        if request.user.role not in ['OWNER', 'DEVELOPER']:
+        shop_id = request.query_params.get('shop_id')
+        if not shop_id:
             return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        if return_obj.status != 'PENDING':
-            return Response(
-                {'error': 'Only pending returns can be approved'},
+                {'error': 'shop_id parameter is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        return_obj.status = 'APPROVED'
-        return_obj.save()
-        
-        # Update stock - add returned items back to salesman's stock
         try:
-            stock = SalesmanStock.objects.get(
-                salesman=return_obj.invoice.salesman,
-                product=return_obj.product
-            )
-            stock.available_quantity += return_obj.quantity_returned
-            stock.save()
-            
-            # Create stock movement record
-            StockMovement.objects.create(
-                product=return_obj.product,
-                salesman=return_obj.invoice.salesman,
-                movement_type='return',
-                quantity=return_obj.quantity_returned,
-                notes=f'Return approved: {return_obj.reason}',
-                reference_id=str(return_obj.invoice.id),
-                created_by=request.user
-            )
-        except SalesmanStock.DoesNotExist:
-            # Create new stock entry if it doesn't exist
-            SalesmanStock.objects.create(
-                salesman=return_obj.invoice.salesman,
-                product=return_obj.product,
-                available_quantity=return_obj.quantity_returned,
-                allocated_quantity=0
+            from accounts.models import Shop
+            shop = Shop.objects.get(id=shop_id)
+        except Shop.DoesNotExist:
+            return Response(
+                {'error': 'Shop not found'},
+                status=status.HTTP_404_NOT_FOUND
             )
         
-        serializer = self.get_serializer(return_obj)
-        return Response(serializer.data)
-
+        # Get invoices that have outstanding balance
+        outstanding_invoices = Invoice.objects.filter(
+            shop=shop,
+            status__in=['pending', 'partial', 'overdue']
+        ).order_by('-invoice_date')
+        
+        invoices_data = []
+        total_outstanding = Decimal('0.00')
+        
+        for invoice in outstanding_invoices:
+            if invoice.balance_due > 0:
+                invoices_data.append({
+                    'id': invoice.id,
+                    'invoice_number': invoice.invoice_number,
+                    'invoice_date': invoice.invoice_date,
+                    'net_total': invoice.net_total,
+                    'paid_amount': invoice.paid_amount,
+                    'balance_due': invoice.balance_due,
+                    'status': invoice.status,
+                    'due_date': invoice.due_date,
+                })
+                total_outstanding += invoice.balance_due
+        
+        return Response({
+            'shop': {
+                'id': shop.id,
+                'name': shop.name,
+                'contact_person': shop.contact_person
+            },
+            'invoices': invoices_data,
+            'total_outstanding': total_outstanding
+        })
+    
     @extend_schema(
-        summary="Get pending returns",
-        description="Get all pending return requests based on user permissions",
+        summary="Get total debits summary",
+        description="Get total outstanding amount across all invoices",
         responses={
             200: OpenApiResponse(
-                response=ReturnSerializer(many=True),
-                description="List of pending returns",
+                description="Total debits summary",
                 examples=[
                     OpenApiExample(
-                        "Pending Returns Response",
-                        value=[
-                            {
-                                "id": 1,
-                                "status": "PENDING",
-                                "invoice": 1,
-                                "product": 1,
-                                "quantity_returned": 3,
-                                "reason": "Wrong size",
-                                "return_date": "2025-06-01",
-                                "processed_by": 1
-                            }
-                        ]
+                        "Debits Summary Response",
+                        value={
+                            "total_debits": 25000.00,
+                            "invoices_count": 15,
+                            "by_status": {
+                                "pending": 15000.00,
+                                "partial": 8000.00,
+                                "overdue": 2000.00
+                            },
+                            "by_shop": [
+                                {
+                                    "shop_id": 1,
+                                    "shop_name": "Shop ABC",
+                                    "outstanding_amount": 5000.00,
+                                    "invoices_count": 3
+                                }
+                            ]
+                        }
                     )
                 ]
             )
@@ -1047,105 +914,289 @@ class ReturnViewSet(viewsets.ModelViewSet):
         tags=['Sales Management']
     )
     @action(detail=False, methods=['get'])
-    def pending(self, request):
+    def total_debits(self, request):
         """
-        Get pending returns
+        Get total debits (outstanding invoice amounts) summary
         """
-        pending_returns = self.get_queryset().filter(status='PENDING')
-        serializer = self.get_serializer(pending_returns, many=True)
-        return Response(serializer.data)
-
-
-@extend_schema_view(
-    sales_performance=extend_schema(
-        summary="Get sales performance by salesman",
-        description="Get comprehensive sales performance metrics for all salesmen (Owner/Developer only)",
+        base_queryset = self.get_base_invoice_queryset()
+        
+        # Get all unpaid invoices
+        outstanding_invoices = base_queryset.filter(
+            status__in=['pending', 'partial', 'overdue']
+        ).select_related('shop')
+        
+        total_debits = outstanding_invoices.aggregate(
+            total=Sum('balance_due')
+        )['total'] or Decimal('0.00')
+        
+        invoices_count = outstanding_invoices.count()
+        
+        # Summary by status
+        by_status = {}
+        for status_choice in ['pending', 'partial', 'overdue']:
+            amount = outstanding_invoices.filter(status=status_choice).aggregate(
+                total=Sum('balance_due')
+            )['total'] or Decimal('0.00')
+            by_status[status_choice] = amount
+        
+        # Summary by shop
+        from django.db.models import Count
+        by_shop = outstanding_invoices.values(
+            'shop__id', 'shop__name'
+        ).annotate(
+            outstanding_amount=Sum('balance_due'),
+            invoices_count=Count('id')
+        ).order_by('-outstanding_amount')
+        
+        return Response({
+            'total_debits': total_debits,
+            'invoices_count': invoices_count,
+            'by_status': by_status,
+            'by_shop': list(by_shop)
+        })
+    
+    @extend_schema(
+        summary="Settle invoice",
+        description="Process payment for a specific invoice (full or partial settlement)",
+        request=OpenApiExample(
+            "Settlement Request",
+            value={
+                "invoice_id": 1,
+                "amount": 1000.00,
+                "payment_method": "cash",
+                "reference_number": "REF123",
+                "notes": "Full payment received"
+            }
+        ),
         responses={
-            200: OpenApiResponse(
-                response=SalesPerformanceSerializer(many=True),
-                description="Sales performance data",
+            201: OpenApiResponse(
+                description="Payment processed successfully",
                 examples=[
                     OpenApiExample(
-                        "Sales Performance Response",
-                        value=[
-                            {
-                                "salesman_id": 1,
-                                "salesman_name": "John Smith",
-                                "total_sales": 15000.00,
-                                "total_invoices": 45,
-                                "average_sale": 333.33,
-                                "commission_earned": 750.00
-                            }
-                        ]
+                        "Settlement Response",
+                        value={
+                            "transaction_id": 15,
+                            "invoice": {
+                                "id": 1,
+                                "invoice_number": "INV-2025-0001",
+                                "previous_balance": 1000.00,
+                                "payment_amount": 1000.00,
+                                "new_balance": 0.00,
+                                "status": "paid"
+                            },
+                            "message": "Invoice settled successfully"
+                        }
                     )
                 ]
             ),
-            403: OpenApiResponse(description="Permission denied")
+            400: OpenApiResponse(description="Invalid payment amount or invoice"),
+            404: OpenApiResponse(description="Invoice not found")
         },
-        tags=['Sales Analytics']
-    ),
-    monthly_trends=extend_schema(
-        summary="Get monthly sales trends",
-        description="Get sales trends for the last 12 months based on user permissions",
-        responses={
-            200: OpenApiResponse(
-                description="Monthly sales trend data",
-                examples=[
-                    OpenApiExample(
-                        "Monthly Trends Response",
-                        value=[
-                            {
-                                "month": "2025-05",
-                                "month_name": "May 2025",
-                                "total_sales": 12000.00,
-                                "invoice_count": 35
-                            },
-                            {
-                                "month": "2025-06",
-                                "month_name": "June 2025",
-                                "total_sales": 15000.00,
-                                "invoice_count": 42
-                            }
-                        ]
-                    )
-                ]
-            )
-        },
-        tags=['Sales Analytics']
-    ),
-    top_products=extend_schema(
-        summary="Get top selling products",
-        description="Get top 10 products by quantity sold based on user permissions",
-        responses={
-            200: OpenApiResponse(
-                description="Top selling products data",
-                examples=[
-                    OpenApiExample(
-                        "Top Products Response",
-                        value=[
-                            {
-                                "product__id": 1,
-                                "product__name": "Aloe Vera Gel",
-                                "product__sku": "ALV001",
-                                "total_quantity": 150,
-                                "total_revenue": 7500.00
-                            }
-                        ]
-                    )
-                ]
-            )
-        },
-        tags=['Sales Analytics']
+        tags=['Sales Management']
     )
-)
-class SalesAnalyticsViewSet(viewsets.ViewSet):
-    """
-    ViewSet for sales analytics and reports with role-based data filtering
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get_base_queryset(self):
-        """Get base queryset based on user role"""
+    @action(detail=False, methods=['post'])
+    def settle_invoice(self, request):
+        """
+        Settle an invoice with payment (full or partial)
+        """
+        invoice_id = request.data.get('invoice_id')
+        amount = request.data.get('amount')
+        payment_method = request.data.get('payment_method', 'cash')
+        reference_number = request.data.get('reference_number', '')
+        notes = request.data.get('notes', '')
+        
+        if not invoice_id or not amount:
+            return Response(
+                {'error': 'invoice_id and amount are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            amount = Decimal(str(amount))
+            if amount <= 0:
+                return Response(
+                    {'error': 'Amount must be greater than zero'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid amount format'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            invoice = Invoice.objects.get(id=invoice_id)
+        except Invoice.DoesNotExist:
+            return Response(
+                {'error': 'Invoice not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if payment amount doesn't exceed outstanding balance
+        if amount > invoice.balance_due:
+            return Response(
+                {'error': f'Payment amount ({amount}) exceeds outstanding balance ({invoice.balance_due})'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Store previous balance for response
+        previous_balance = invoice.balance_due
+        
+        # Create transaction
+        transaction = Transaction.objects.create(
+            invoice=invoice,
+            amount=amount,
+            payment_method=payment_method,
+            reference_number=reference_number,
+            notes=notes,
+            created_by=request.user
+        )
+        
+        # Transaction save method will update invoice automatically
+        invoice.refresh_from_db()
+        
+        return Response({
+            'transaction_id': transaction.id,
+            'invoice': {
+                'id': invoice.id,
+                'invoice_number': invoice.invoice_number,
+                'previous_balance': previous_balance,
+                'payment_amount': amount,
+                'new_balance': invoice.balance_due,
+                'status': invoice.status
+            },
+            'message': 'Invoice settled successfully'
+        }, status=status.HTTP_201_CREATED)
+    
+    @extend_schema(
+        summary="Settle invoice with multiple payment methods",
+        description="Process multiple payments for a single invoice settlement",
+        request=MultiPaymentSettlementSerializer,
+        responses={
+            201: OpenApiResponse(
+                description="Multi-payment settlement processed successfully",
+                examples=[
+                    OpenApiExample(
+                        "Multi-Payment Settlement Response",
+                        value={
+                            "settlement_id": 15,
+                            "invoice": {
+                                "id": 1,
+                                "invoice_number": "INV-2025-0001",
+                                "previous_balance": 1000.00,
+                                "total_payment_amount": 1000.00,
+                                "new_balance": 0.00,
+                                "status": "paid"
+                            },
+                            "payments": [
+                                {
+                                    "payment_method": "cash",
+                                    "amount": 600.00,
+                                    "reference_number": ""
+                                },
+                                {
+                                    "payment_method": "cheque", 
+                                    "amount": 300.00,
+                                    "reference_number": "CHQ123"
+                                },
+                                {
+                                    "payment_method": "return",
+                                    "amount": 100.00,
+                                    "reference_number": "RET456"
+                                }
+                            ],
+                            "message": "Invoice settled successfully with multiple payments"
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Invalid payment data"),
+            404: OpenApiResponse(description="Invoice not found")
+        },
+        tags=['Sales Management']
+    )
+    @action(detail=False, methods=['post'])
+    def settle_invoice_multi_payment(self, request):
+        """
+        Settle an invoice with multiple payment methods
+        """
+        serializer = MultiPaymentSettlementSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(
+                {'error': 'Invalid data', 'details': serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        validated_data = serializer.validated_data
+        invoice_id = validated_data['invoice_id']
+        payments_data = validated_data['payments']
+        notes = validated_data.get('notes', '')
+        
+        try:
+            invoice = Invoice.objects.get(id=invoice_id)
+            previous_balance = invoice.balance_due
+            
+            # Calculate total payment amount
+            total_payment_amount = sum(Decimal(str(p['amount'])) for p in payments_data)
+            
+            # Create settlement
+            settlement = InvoiceSettlement.objects.create(
+                invoice=invoice,
+                total_amount=total_payment_amount,
+                notes=notes,
+                created_by=request.user
+            )
+            
+            # Create individual payments
+            created_payments = []
+            for payment_data in payments_data:
+                payment = SettlementPayment.objects.create(
+                    settlement=settlement,
+                    payment_method=payment_data['payment_method'],
+                    amount=Decimal(str(payment_data['amount'])),
+                    reference_number=payment_data.get('reference_number', ''),
+                    bank_name=payment_data.get('bank_name', ''),
+                    cheque_date=payment_data.get('cheque_date'),
+                    notes=payment_data.get('notes', '')
+                )
+                created_payments.append({
+                    'payment_method': payment.payment_method,
+                    'amount': payment.amount,
+                    'reference_number': payment.reference_number
+                })
+            
+            # Settlement save method will update invoice automatically
+            settlement.save()
+            invoice.refresh_from_db()
+            
+            return Response({
+                'settlement_id': settlement.id,
+                'invoice': {
+                    'id': invoice.id,
+                    'invoice_number': invoice.invoice_number,
+                    'previous_balance': previous_balance,
+                    'total_payment_amount': total_payment_amount,
+                    'new_balance': invoice.balance_due,
+                    'status': invoice.status
+                },
+                'payments': created_payments,
+                'message': 'Invoice settled successfully with multiple payments'
+            }, status=status.HTTP_201_CREATED)
+            
+        except Invoice.DoesNotExist:
+            return Response(
+                {'error': 'Invoice not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to process settlement: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def get_base_invoice_queryset(self):
+        """Get base invoice queryset based on user permissions"""
         user = self.request.user
         
         if user.role == 'SALESMAN':
@@ -1154,107 +1205,3 @@ class SalesAnalyticsViewSet(viewsets.ViewSet):
             return Invoice.objects.filter(shop=user.shop_profile)
         else:
             return Invoice.objects.all()
-
-    @action(detail=False, methods=['get'])
-    def sales_performance(self, request):
-        """
-        Get sales performance by salesman
-        """
-        if request.user.role not in ['OWNER', 'DEVELOPER']:
-            return Response(
-                {'error': 'Permission denied'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        from accounts.models import Salesman
-        
-        salesmen = Salesman.objects.select_related('user').all()
-        performance_data = []
-        
-        for salesman in salesmen:
-            invoices = Invoice.objects.filter(salesman=salesman, status__in=['PAID', 'PARTIAL'])
-            
-            total_sales = invoices.aggregate(total=Sum('subtotal'))['total'] or Decimal('0')
-            total_invoices = invoices.count()
-            average_sale = total_sales / total_invoices if total_invoices > 0 else Decimal('0')
-            
-            # Calculate commission (assuming 5% commission rate)
-            commission_rate = salesman.commission_rate or Decimal('0.05')
-            commission_earned = total_sales * commission_rate
-            
-            performance_data.append({
-                'salesman_id': salesman.id,
-                'salesman_name': salesman.user.get_full_name(),
-                'total_sales': total_sales,
-                'total_invoices': total_invoices,
-                'average_sale': average_sale,
-                'commission_earned': commission_earned
-            })
-        
-        serializer = SalesPerformanceSerializer(performance_data, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def monthly_trends(self, request):
-        """
-        Get monthly sales trends
-        """
-        queryset = self.get_base_queryset()
-        
-        # Get data for last 12 months
-        end_date = timezone.now().date()
-        start_date = end_date - timedelta(days=365)
-        
-        monthly_data = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            month_start = current_date.replace(day=1)
-            if current_date.month == 12:
-                month_end = current_date.replace(year=current_date.year + 1, month=1, day=1) - timedelta(days=1)
-            else:
-                month_end = current_date.replace(month=current_date.month + 1, day=1) - timedelta(days=1)
-            
-            month_invoices = queryset.filter(
-                invoice_date__gte=month_start,
-                invoice_date__lte=month_end,
-                status__in=['PAID', 'PARTIAL']
-            )
-            
-            monthly_sales = month_invoices.aggregate(total=Sum('subtotal'))['total'] or Decimal('0')
-            invoice_count = month_invoices.count()
-            
-            monthly_data.append({
-                'month': month_start.strftime('%Y-%m'),
-                'month_name': month_start.strftime('%B %Y'),
-                'total_sales': monthly_sales,
-                'invoice_count': invoice_count
-            })
-            
-            # Move to next month
-            if current_date.month == 12:
-                current_date = current_date.replace(year=current_date.year + 1, month=1)
-            else:
-                current_date = current_date.replace(month=current_date.month + 1)
-        
-        return Response(monthly_data)
-
-    @action(detail=False, methods=['get'])
-    def top_products(self, request):
-        """
-        Get top selling products
-        """
-        queryset = self.get_base_queryset()
-        
-        # Get top products by quantity sold
-        top_products = InvoiceItem.objects.filter(
-            invoice__in=queryset,
-            invoice__status__in=['PAID', 'PARTIAL']
-        ).values(
-            'product__id', 'product__name', 'product__sku'
-        ).annotate(
-            total_quantity=Sum('quantity'),
-            total_revenue=Sum(F('quantity') * F('unit_price'))
-        ).order_by('-total_quantity')[:10]
-        
-        return Response(list(top_products))

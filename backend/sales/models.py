@@ -74,11 +74,28 @@ class Invoice(models.Model):
         return f"{prefix}{new_number:04d}"
     
     def calculate_totals(self):
-        """Calculate invoice totals"""
+        """Calculate invoice totals based on unit price * quantity with shop margin applied at invoice level"""
         if not self.pk:  # If invoice hasn't been saved yet, skip calculation
             return
+        
         items = self.items.all()
-        self.subtotal = sum(item.total_price for item in items) or Decimal('0.00')
+        
+        # Calculate total product price (sum of unit_price * quantity for all items)
+        total_product_price = sum(
+            Decimal(str(item.unit_price)) * Decimal(str(item.quantity)) 
+            for item in items
+        ) or Decimal('0.00')
+        
+        # Get shop margin from the first item (all items should have the same shop margin)
+        shop_margin_percent = Decimal('0.00')
+        if items.exists():
+            shop_margin_percent = items.first().shop_margin or Decimal('0.00')
+        
+        # Calculate margin amount: total_product_price * shop_margin_percent / 100
+        margin_amount = total_product_price * (shop_margin_percent / Decimal('100'))
+        
+        # Invoice calculation: total_product_price - margin_amount + tax - discount
+        self.subtotal = total_product_price - margin_amount
         self.net_total = self.subtotal + Decimal(str(self.tax_amount)) - Decimal(str(self.discount_amount))
         self.balance_due = self.net_total - Decimal(str(self.paid_amount))
     
@@ -122,22 +139,18 @@ class InvoiceItem(models.Model):
         return f"{self.product.name} x {self.quantity} - {self.invoice.invoice_number}"
     
     def save(self, *args, **kwargs):
-        # Calculate prices if not already set
-        if not self.calculated_price:
-            self.calculated_price = self.product.calculate_selling_price(
-                self.salesman_margin, self.shop_margin
-            )
+        # Set calculated_price to unit_price (no margins applied at item level)
+        self.calculated_price = Decimal(str(self.unit_price))
         
-        if not self.unit_price:
-            self.unit_price = self.product.base_price
-        
-        self.total_price = Decimal(str(self.quantity)) * self.calculated_price
+        # Set total_price to unit_price * quantity (simple multiplication)
+        self.total_price = Decimal(str(self.quantity)) * Decimal(str(self.unit_price))
         
         super().save(*args, **kwargs)
         
         # Update invoice totals
-        self.invoice.calculate_totals()
-        self.invoice.save()
+        if self.invoice_id:  # Only if invoice exists
+            self.invoice.calculate_totals()
+            self.invoice.save()
     
     def get_line_total(self):
         """Get the line total for this invoice item"""
@@ -256,3 +269,73 @@ class Return(models.Model):
     class Meta:
         db_table = 'returns'
         ordering = ['-created_at']
+
+
+class InvoiceSettlement(models.Model):
+    """Settlement session for an invoice with multiple payment methods"""
+    
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='settlements')
+    settlement_date = models.DateTimeField(auto_now_add=True)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"Settlement for {self.invoice.invoice_number} - {self.total_amount}"
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        
+        # Update invoice paid amount and status
+        total_paid = sum(
+            settlement.total_amount 
+            for settlement in self.invoice.settlements.all()
+        )
+        
+        self.invoice.paid_amount = total_paid
+        self.invoice.balance_due = self.invoice.net_total - self.invoice.paid_amount
+        
+        # Update invoice status
+        if self.invoice.balance_due <= 0:
+            self.invoice.status = 'paid'
+        elif self.invoice.paid_amount > 0:
+            self.invoice.status = 'partial'
+        
+        self.invoice.save()
+    
+    class Meta:
+        db_table = 'invoice_settlements'
+        ordering = ['-created_at']
+
+
+class SettlementPayment(models.Model):
+    """Individual payment within a settlement"""
+    
+    PAYMENT_METHODS = [
+        ('cash', 'Cash'),
+        ('cheque', 'Cheque'),
+        ('return', 'Return'),
+        ('bill_to_bill', 'Bill to Bill'),
+        ('bank_transfer', 'Bank Transfer'),
+        ('credit_note', 'Credit Note'),
+    ]
+    
+    settlement = models.ForeignKey(InvoiceSettlement, on_delete=models.CASCADE, related_name='payments')
+    payment_method = models.CharField(max_length=20, choices=PAYMENT_METHODS)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0.01)])
+    
+    # Additional payment details
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    bank_name = models.CharField(max_length=100, blank=True, null=True)
+    cheque_date = models.DateField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.get_payment_method_display()} - {self.amount}"
+    
+    class Meta:
+        db_table = 'settlement_payments'
+        ordering = ['created_at']
