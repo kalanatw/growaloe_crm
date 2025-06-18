@@ -1,20 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
-import { shopService } from '../services/apiServices';
+import { shopService, companyService } from '../services/apiServices';
 import { CreateShopData } from '../types';
 import { ArrowLeft, Save } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useAuth } from '../contexts/AuthContext';
 
 export const CreateShopPage: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [maxShopMargin, setMaxShopMargin] = useState<number>(20); // Default to 20%
+  const userRole = user?.role || 'salesman'; // Get role from auth context
+
+  useEffect(() => {
+    loadCompanySettings();
+  }, []);
+
+  const loadCompanySettings = async () => {
+    try {
+      const [companySettings] = await Promise.all([
+        companyService.getPublicSettings(),
+      ]);
+
+      setMaxShopMargin(companySettings.max_shop_margin_for_salesmen);
+    } catch (error) {
+      console.error('Error loading company settings:', error);
+      // Use default values if settings can't be loaded
+    }
+  };
+
+  // Helper function to get effective max margin based on user role
+  const getEffectiveMaxMargin = () => {
+    return userRole === 'salesman' ? maxShopMargin : 100;
+  };
 
   const {
     register,
     handleSubmit,
     formState: { errors },
+    clearErrors,
+    setError,
   } = useForm<CreateShopData>({
     defaultValues: {
       shop_margin: 0,
@@ -23,7 +51,25 @@ export const CreateShopPage: React.FC = () => {
     },
   });
 
+  // Custom validation for shop margin
+  const validateShopMargin = (value: number | undefined) => {
+    if (value === undefined || value === null) return true; // Allow undefined/null (not required field)
+    if (value < 0) return 'Margin cannot be negative';
+    if (value > 100) return 'Margin cannot exceed 100%';
+    if (userRole === 'salesman' && value > maxShopMargin) {
+      return `Salesmen cannot set margin above ${maxShopMargin}%`;
+    }
+    return true;
+  };
+
   const onSubmit = async (data: CreateShopData) => {
+    // Validate shop margin for salesmen
+    const shopMargin = data.shop_margin || 0;
+    if (userRole === 'salesman' && shopMargin > maxShopMargin) {
+      toast.error(`Shop margin cannot exceed ${maxShopMargin}% for salesmen`);
+      return;
+    }
+
     try {
       setIsSubmitting(true);
       const shop = await shopService.createShop(data);
@@ -163,13 +209,12 @@ export const CreateShopPage: React.FC = () => {
                   <input
                     {...register('shop_margin', { 
                       valueAsNumber: true,
-                      min: { value: 0, message: 'Margin cannot be negative' },
-                      max: { value: 100, message: 'Margin cannot exceed 100%' }
+                      validate: validateShopMargin
                     })}
                     type="number"
                     step="0.1"
                     min="0"
-                    max="100"
+                    max={getEffectiveMaxMargin()}
                     className="input"
                     placeholder="0.0"
                   />
@@ -178,6 +223,11 @@ export const CreateShopPage: React.FC = () => {
                   )}
                   <p className="mt-1 text-xs text-gray-500">
                     Profit margin percentage for this shop
+                    {userRole === 'salesman' && (
+                      <span className="block text-orange-600 dark:text-orange-400">
+                        Maximum allowed for salesmen: {maxShopMargin}%
+                      </span>
+                    )}
                   </p>
                 </div>
 

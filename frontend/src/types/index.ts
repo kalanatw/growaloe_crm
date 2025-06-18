@@ -114,6 +114,7 @@ export interface Invoice {
   tax_rate?: number;
   discount_amount: number;
   discount?: number;
+  shop_margin: number;
   net_total: number;
   paid_amount: number;
   balance_due: number;
@@ -157,6 +158,7 @@ export interface CreateInvoiceData {
   due_date?: string;
   tax_amount?: number;
   discount_amount?: number;
+  shop_margin?: number;
   notes?: string;
   terms_conditions?: string;
   items: {
@@ -328,4 +330,39 @@ export interface UpdateCompanySettingsData {
   currency_symbol?: string;
   default_payment_terms?: string;
   default_due_days?: number;
+}
+
+export interface DeliveryItem {
+  id?: number;
+  product: number;
+  product_name?: string;
+  product_sku?: string;
+  quantity: number;
+  notes?: string;
+}
+
+export interface Delivery {
+  id?: number;
+  salesman: number;
+  salesman_name?: string;
+  delivery_date: string;
+  status: string;
+  notes?: string;
+  items: DeliveryItem[];
+  total_items?: number;
+  created_by?: number;
+  created_by_name?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreateDeliveryData {
+  salesman: number;
+  delivery_date: string;
+  notes?: string;
+  items: {
+    product: number;
+    quantity: number;
+    notes?: string;
+  }[];
 }

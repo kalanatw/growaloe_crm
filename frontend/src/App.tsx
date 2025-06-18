@@ -19,6 +19,7 @@ import { TransactionsPage } from './pages/TransactionsPage';
 import { SalesmenPage } from './pages/SalesmenPage';
 import { CreateSalesmanPage } from './pages/CreateSalesmanPage';
 import { InvoiceSettlementPage } from './pages/InvoiceSettlementPage';
+import { DeliveriesPage } from './pages/DeliveriesPage';
 import { USER_ROLES } from './config/constants';
 
 const queryClient = new QueryClient({
@@ -132,6 +133,14 @@ function App() {
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER]}>
                       <CreateSalesmanPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/deliveries"
+                  element={
+                    <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
+                      <DeliveriesPage />
                     </ProtectedRoute>
                   }
                 />

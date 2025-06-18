@@ -1,17 +1,20 @@
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db.models import Q, Sum, Count, F
+from django.db import models
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 
-from .models import Category, Product, SalesmanStock, StockMovement
+from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem
 from .serializers import (
     CategorySerializer, ProductSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
-    SalesmanStockSummarySerializer
+    SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
+    DeliveryItemSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 
@@ -540,7 +543,7 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def my_stock(self, request):
         """
-        Get current user's stock (for salesmen)
+        Get current user's stock from deliveries (for salesmen)
         """
         if request.user.role != 'salesman':
             return Response(
@@ -548,40 +551,94 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        stocks = self.get_queryset().filter(salesman=request.user.salesman_profile)
-        serializer = self.get_serializer(stocks, many=True)
+        # Get salesman's current stock from deliveries
+        from .models import DeliveryItem
         
-        # Calculate summary
-        total_products = stocks.count()
-        total_value = sum(stock.allocated_quantity * stock.product.cost_price for stock in stocks)
+        # Get all delivery items for this salesman
+        delivery_items = DeliveryItem.objects.filter(
+            delivery__salesman=request.user.salesman_profile
+        ).select_related('product', 'delivery')
+        
+        # Group by product and calculate remaining stock
+        stock_data = {}
+        for item in delivery_items:
+            product_id = item.product.id
+            if product_id not in stock_data:
+                stock_data[product_id] = {
+                    'product': item.product,
+                    'delivered_quantity': 0,
+                    'sold_quantity': 0,  # Will be calculated from invoices
+                    'remaining_quantity': 0
+                }
+            stock_data[product_id]['delivered_quantity'] += item.quantity
+        
+        # Calculate sold quantities from invoices
+        from sales.models import InvoiceItem
+        for product_id in stock_data.keys():
+            sold_qty = InvoiceItem.objects.filter(
+                invoice__salesman=request.user.salesman_profile,
+                product_id=product_id
+            ).aggregate(total_sold=Sum('quantity'))['total_sold'] or 0
+            
+            stock_data[product_id]['sold_quantity'] = sold_qty
+            stock_data[product_id]['remaining_quantity'] = (
+                stock_data[product_id]['delivered_quantity'] - sold_qty
+            )
+        
+        # Convert to serializable format matching SalesmanStock interface
+        stock_data_list = []
+        for product_id, data in stock_data.items():
+            if data['remaining_quantity'] > 0:  # Only show products with remaining stock
+                stock_data_list.append({
+                    'id': f"delivery_{product_id}",
+                    'salesman': request.user.salesman_profile.id,
+                    'salesman_name': request.user.get_full_name(),
+                    'product': data['product'].id,
+                    'product_name': data['product'].name,
+                    'product_sku': data['product'].sku,
+                    'product_base_price': float(data['product'].base_price),
+                    'allocated_quantity': data['delivered_quantity'],
+                    'available_quantity': data['remaining_quantity'],
+                    'created_at': timezone.now().isoformat(),
+                    'updated_at': timezone.now().isoformat(),
+                })
         
         return Response({
-            'stocks': serializer.data,
+            'stocks': stock_data_list,
             'summary': {
-                'total_products': total_products,
-                'total_stock_value': total_value
+                'total_products': len(stock_data_list),
+                'total_stock_value': sum(
+                    float(stock['product_base_price']) * stock['available_quantity'] 
+                    for stock in stock_data_list
+                )
             }
         })
 
     @extend_schema(
-        summary="Get stock summary by salesman",
-        description="Get comprehensive stock summary for all salesmen (Owner/Developer only)",
+        summary="Get all available stock",
+        description="Get all available stock across all salesmen for invoice creation (Owner/Developer only)",
         responses={
             200: OpenApiResponse(
-                response=SalesmanStockSummarySerializer(many=True),
-                description="Stock summary by salesman",
+                description="All available stock with summary",
                 examples=[
                     OpenApiExample(
-                        "Salesman Summary Response",
-                        value=[
-                            {
-                                "salesman_id": 1,
-                                "salesman_name": "John Smith",
-                                "total_products": 5,
-                                "total_stock_value": 2500.00,
-                                "products": []
+                        "All Stock Response",
+                        value={
+                            "stocks": [
+                                {
+                                    "id": 1,
+                                    "product": 1,
+                                    "product_name": "Aloe Vera Gel",
+                                    "available_quantity": 50,
+                                    "allocated_quantity": 60,
+                                    "salesman_name": "John Smith"
+                                }
+                            ],
+                            "summary": {
+                                "total_products": 10,
+                                "total_available_quantity": 150
                             }
-                        ]
+                        }
                     )
                 ]
             ),
@@ -590,9 +647,9 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
         tags=['Product Management']
     )
     @action(detail=False, methods=['get'])
-    def salesman_summary(self, request):
+    def all_available_stock(self, request):
         """
-        Get stock summary by salesman
+        Get all available stock across all salesmen from deliveries (for owners/developers)
         """
         if request.user.role not in ['owner', 'developer']:
             return Response(
@@ -600,40 +657,99 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        from accounts.models import Salesman
+        # Get all delivery items for salesmen under this owner
+        from .models import DeliveryItem
+        from accounts.models import Salesman, Owner
         
-        salesmen = Salesman.objects.select_related('user').prefetch_related(
-            'stock_allocations__product'
-        ).all()
-
-        summary_data = []
-        for salesman in salesmen:
-            stocks = salesman.stock_allocations.all()
-            total_value = sum(stock.allocated_quantity * stock.product.cost_price for stock in stocks)
+        # Get the Owner instance for this user
+        try:
+            owner = Owner.objects.get(user=request.user)
+        except Owner.DoesNotExist:
+            return Response(
+                {'error': 'Owner profile not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all salesmen under this owner
+        salesmen = Salesman.objects.filter(owner=owner)
+        
+        # Get all delivery items for these salesmen
+        delivery_items = DeliveryItem.objects.filter(
+            delivery__salesman__in=salesmen
+        ).select_related('product', 'delivery__salesman__user')
+        
+        # Group by salesman and product
+        stock_data = {}
+        for item in delivery_items:
+            salesman_id = item.delivery.salesman.id
+            product_id = item.product.id
+            key = f"{salesman_id}_{product_id}"
             
-            summary_data.append({
-                'salesman_id': salesman.id,
-                'salesman_name': salesman.user.get_full_name(),
-                'total_products': stocks.count(),
-                'total_stock_value': total_value,
-                'products': [stock.product for stock in stocks]
-            })
-
-        serializer = SalesmanStockSummarySerializer(summary_data, many=True)
-        return Response(serializer.data)
+            if key not in stock_data:
+                stock_data[key] = {
+                    'salesman': item.delivery.salesman,
+                    'product': item.product,
+                    'delivered_quantity': 0,
+                    'sold_quantity': 0,
+                    'remaining_quantity': 0
+                }
+            stock_data[key]['delivered_quantity'] += item.quantity
+        
+        # Calculate sold quantities
+        from sales.models import InvoiceItem
+        for key, data in stock_data.items():
+            sold_qty = InvoiceItem.objects.filter(
+                invoice__salesman=data['salesman'],
+                product=data['product']
+            ).aggregate(total_sold=Sum('quantity'))['total_sold'] or 0
+            
+            data['sold_quantity'] = sold_qty
+            data['remaining_quantity'] = data['delivered_quantity'] - sold_qty
+        
+        # Convert to response format
+        stocks = []
+        for key, data in stock_data.items():
+            if data['remaining_quantity'] > 0:  # Only show items with remaining stock
+                stocks.append({
+                    'id': f"delivery_{key}",
+                    'product_id': data['product'].id,
+                    'product_name': data['product'].name,
+                    'product': {
+                        'id': data['product'].id,
+                        'name': data['product'].name,
+                        'cost_price': str(data['product'].cost_price),
+                        'selling_price': str(data['product'].base_price),
+                        'category': data['product'].category
+                    },
+                    'allocated_quantity': data['remaining_quantity'],
+                    'delivered_quantity': data['delivered_quantity'],
+                    'sold_quantity': data['sold_quantity'],
+                    'salesman_name': data['salesman'].user.get_full_name()
+                })
+        
+        # Calculate summary
+        total_products = len(set(stock['product_id'] for stock in stocks))
+        total_available = sum(stock['allocated_quantity'] for stock in stocks)
+        
+        return Response({
+            'stocks': stocks,
+            'summary': {
+                'total_products': total_products,
+                'total_available_quantity': total_available
+            }
+        })
 
 
 @extend_schema_view(
     list=extend_schema(
         summary="List stock movements",
-        description="Get a paginated list of stock movement history based on user permissions",
+        description="Get a paginated list of all stock movements for audit and tracking",
         parameters=[
             OpenApiParameter(
-                name='movement_type',
-                description='Filter by movement type',
+                name='product',
+                description='Filter by product ID',
                 required=False,
-                type=str,
-                enum=['IN', 'OUT', 'TRANSFER', 'ADJUSTMENT']
+                type=int
             ),
             OpenApiParameter(
                 name='salesman',
@@ -642,161 +758,387 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                 type=int
             ),
             OpenApiParameter(
-                name='product',
-                description='Filter by product ID',
+                name='movement_type',
+                description='Filter by movement type',
                 required=False,
-                type=int
+                type=str,
+                enum=['purchase', 'sale', 'allocation', 'return', 'adjustment', 'damage']
             ),
             OpenApiParameter(
                 name='search',
-                description='Search by product name/SKU or reason',
+                description='Search by product name, notes, or reference ID',
                 required=False,
                 type=str
-            ),
-            OpenApiParameter(
-                name='ordering',
-                description='Order results by field (prefix with - for descending)',
-                required=False,
-                type=str,
-                enum=['created_at', '-created_at', 'quantity', '-quantity']
             )
         ],
         responses={200: StockMovementSerializer(many=True)},
-        tags=['Product Management']
+        tags=['Stock Management']
+    ),
+    create=extend_schema(
+        summary="Create stock movement",
+        description="Record a new stock movement (purchase, sale, allocation, etc.)",
+        request=StockMovementSerializer,
+        responses={201: StockMovementSerializer},
+        tags=['Stock Management']
     ),
     retrieve=extend_schema(
         summary="Get stock movement details",
-        description="Retrieve detailed information about a specific stock movement",
-        responses={
-            200: StockMovementSerializer,
-            404: OpenApiResponse(description="Stock movement not found")
-        },
-        tags=['Product Management']
+        description="Get detailed information about a specific stock movement",
+        responses={200: StockMovementSerializer},
+        tags=['Stock Management']
+    ),
+    update=extend_schema(
+        summary="Update stock movement",
+        description="Update stock movement details (limited to certain fields)",
+        request=StockMovementSerializer,
+        responses={200: StockMovementSerializer},
+        tags=['Stock Management']
+    ),
+    partial_update=extend_schema(
+        summary="Partially update stock movement",
+        description="Partially update stock movement details",
+        request=StockMovementSerializer,
+        responses={200: StockMovementSerializer},
+        tags=['Stock Management']
+    ),
+    destroy=extend_schema(
+        summary="Delete stock movement",
+        description="Delete a stock movement record (admin only)",
+        responses={204: None},
+        tags=['Stock Management']
     )
 )
-class StockMovementViewSet(viewsets.ReadOnlyModelViewSet):
+class StockMovementViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for viewing stock movement history (read-only) with role-based filtering
+    ViewSet for managing stock movements.
+    
+    - Owners/Developers: Can view all stock movements
+    - Salesmen: Can only view their own stock movements
+    - Create: Automatically sets created_by to current user
     """
-    queryset = StockMovement.objects.select_related(
-        'product', 'salesman__user', 'performed_by'
-    ).all()
+    queryset = StockMovement.objects.all()
     serializer_class = StockMovementSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['movement_type', 'salesman', 'product']
-    search_fields = ['product__name', 'product__sku', 'reason']
-    ordering_fields = ['created_at', 'quantity']
+    filterset_fields = ['product', 'salesman', 'movement_type']
+    search_fields = ['product__name', 'notes', 'reference_id']
+    ordering_fields = ['created_at', 'quantity', 'movement_type']
     ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        """
+        Filter queryset based on user role
+        """
         user = self.request.user
-
-        if user.role == 'salesman':
-            # Salesmen can only see their own stock movements
-            return queryset.filter(salesman=user.salesman_profile)
-        elif user.role == 'shop':
-            # Shops can see movements of salesmen assigned to them
-            return queryset.filter(salesman__assigned_shops=user.shop_profile)
-        else:
-            # Owners and Developers can see all movements
+        queryset = StockMovement.objects.select_related(
+            'product', 'salesman__user', 'created_by'
+        )
+        
+        if user.role in ['owner', 'developer']:
             return queryset
+        elif user.role == 'salesman':
+            # Salesmen can only see movements related to their stock
+            try:
+                salesman = user.salesman
+                return queryset.filter(salesman=salesman)
+            except:
+                return queryset.none()
+        else:
+            return queryset.none()
 
-    @extend_schema(
-        summary="Get recent stock movements",
-        description="Get the last 50 stock movements based on user permissions",
-        responses={
-            200: OpenApiResponse(
-                response=StockMovementSerializer(many=True),
-                description="Recent stock movements",
-                examples=[
-                    OpenApiExample(
-                        "Recent Movements Response",
-                        value=[
-                            {
-                                "id": 1,
-                                "product": 1,
-                                "product_name": "Aloe Vera Gel",
-                                "salesman": 1,
-                                "salesman_name": "John Smith",
-                                "movement_type": "OUT",
-                                "quantity": 10,
-                                "reason": "Sale to customer",
-                                "performed_by": 1,
-                                "performed_by_name": "Admin User",
-                                "created_at": "2025-06-01T10:00:00Z"
-                            }
-                        ]
-                    )
-                ]
-            )
-        },
-        tags=['Product Management']
-    )
-    @action(detail=False, methods=['get'])
-    def recent_movements(self, request):
+    def perform_create(self, serializer):
         """
-        Get recent stock movements (last 50)
+        Set the created_by field to the current user
         """
-        movements = self.get_queryset()[:50]
-        serializer = self.get_serializer(movements, many=True)
-        return Response(serializer.data)
+        serializer.save(created_by=self.request.user)
 
-    @extend_schema(
-        summary="Get stock movement summary",
-        description="Get summary statistics of stock movements by type and quantities",
-        responses={
-            200: OpenApiResponse(
-                description="Stock movement summary",
-                examples=[
-                    OpenApiExample(
-                        "Movement Summary Response",
-                        value={
-                            "movements_count": {
-                                "IN": 25,
-                                "OUT": 40,
-                                "TRANSFER": 5,
-                                "ADJUSTMENT": 3
-                            },
-                            "quantities_total": {
-                                "IN": 500,
-                                "OUT": 320,
-                                "TRANSFER": 50,
-                                "ADJUSTMENT": 10
-                            },
-                            "total_movements": 73
-                        }
-                    )
-                ]
-            )
-        },
-        tags=['Product Management']
-    )
     @action(detail=False, methods=['get'])
-    def movement_summary(self, request):
+    def summary(self, request):
         """
-        Get stock movement summary
+        Get stock movement summary statistics
         """
         queryset = self.get_queryset()
         
-        # Count movements by type
-        movements_by_type = {}
-        for movement_type in StockMovement.MOVEMENT_TYPES:
-            movements_by_type[movement_type[0]] = queryset.filter(
-                movement_type=movement_type[0]
-            ).count()
-
-        # Get total quantities by type
-        quantities_by_type = {}
-        for movement_type in StockMovement.MOVEMENT_TYPES:
-            total_qty = queryset.filter(
-                movement_type=movement_type[0]
-            ).aggregate(total=Sum('quantity'))['total'] or 0
-            quantities_by_type[movement_type[0]] = total_qty
-
+        # Calculate statistics
+        total_movements = queryset.count()
+        inward_movements = queryset.filter(quantity__gt=0).aggregate(
+            count=Count('id'), total=Sum('quantity')
+        )
+        outward_movements = queryset.filter(quantity__lt=0).aggregate(
+            count=Count('id'), total=Sum('quantity')
+        )
+        
+        by_type = queryset.values('movement_type').annotate(
+            count=Count('id'),
+            total_quantity=Sum('quantity')
+        ).order_by('movement_type')
+        
         return Response({
-            'movements_count': movements_by_type,
-            'quantities_total': quantities_by_type,
-            'total_movements': queryset.count()
+            'total_movements': total_movements,
+            'inward_movements': {
+                'count': inward_movements['count'] or 0,
+                'total_quantity': inward_movements['total'] or 0
+            },
+            'outward_movements': {
+                'count': outward_movements['count'] or 0,
+                'total_quantity': abs(outward_movements['total'] or 0)  # Make positive for display
+            },
+            'by_movement_type': list(by_type)
         })
+
+    @action(detail=False, methods=['get'])
+    def product_history(self, request):
+        """
+        Get stock movement history for a specific product
+        """
+        product_id = request.query_params.get('product_id')
+        if not product_id:
+            return Response(
+                {'error': 'product_id parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        movements = self.get_queryset().filter(product_id=product_id)
+        serializer = self.get_serializer(movements, many=True)
+        
+        # Calculate running totals
+        running_total = 0
+        history_data = []
+        for movement_data in serializer.data:
+            running_total += movement_data['quantity']
+            movement_data['running_total'] = running_total
+            history_data.append(movement_data)
+        
+        return Response({
+            'movements': history_data,
+            'current_total': running_total
+        })
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List deliveries",
+        description="Get a paginated list of product deliveries to salesmen",
+        parameters=[
+            OpenApiParameter(name='salesman', description='Filter by salesman ID', required=False, type=int),
+            OpenApiParameter(name='status', description='Filter by delivery status', required=False, type=str),
+            OpenApiParameter(name='delivery_date', description='Filter by delivery date (YYYY-MM-DD)', required=False, type=str),
+        ]
+    ),
+    create=extend_schema(
+        summary="Create delivery",
+        description="Create a new product delivery to a salesman",
+        request=CreateDeliverySerializer,
+        responses={201: DeliverySerializer}
+    ),
+    retrieve=extend_schema(
+        summary="Get delivery details",
+        description="Get detailed information about a specific delivery"
+    ),
+    update=extend_schema(
+        summary="Update delivery",
+        description="Update delivery information (only status and notes can be updated after creation)"
+    ),
+    destroy=extend_schema(
+        summary="Delete delivery",
+        description="Delete a delivery (only allowed if status is 'pending')"
+    )
+)
+class DeliveryViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing product deliveries to salesmen.
+    
+    Owners can create deliveries and assign products to salesmen.
+    Salesmen can view their assigned deliveries.
+    """
+    queryset = Delivery.objects.all()
+    serializer_class = DeliverySerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['salesman', 'status', 'delivery_date']
+    search_fields = ['delivery_number', 'salesman__user__first_name', 'salesman__user__last_name', 'notes']
+    ordering_fields = ['delivery_date', 'created_at', 'delivery_number']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        """Filter deliveries based on user role"""
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.role == 'salesman':
+            # Salesmen can only see their own deliveries
+            return queryset.filter(salesman=user.salesman_profile)
+        elif user.role in ['owner', 'developer']:
+            # Owners and developers can see all deliveries
+            if user.role == 'owner':
+                # Filter by salesmen under this owner
+                return queryset.filter(salesman__owner=user.owner_profile)
+            return queryset
+        else:
+            return queryset.none()
+    
+    def get_serializer_class(self):
+        """Use different serializers for create and other actions"""
+        if self.action == 'create':
+            return CreateDeliverySerializer
+        return DeliverySerializer
+    
+    def perform_create(self, serializer):
+        """Set the creator when creating a delivery"""
+        serializer.save(created_by=self.request.user)
+    
+    def perform_update(self, serializer):
+        """Limit what can be updated based on delivery status"""
+        instance = self.get_object()
+        
+        # Only allow status and notes to be updated
+        allowed_fields = ['status', 'notes']
+        validated_data = serializer.validated_data
+        
+        # Remove fields that shouldn't be updated
+        for field in list(validated_data.keys()):
+            if field not in allowed_fields:
+                validated_data.pop(field)
+        
+        # Handle status changes
+        old_status = instance.status
+        new_status = validated_data.get('status', old_status)
+        
+        if old_status != new_status:
+            if new_status == 'delivered' and old_status == 'pending':
+                # When marking as delivered, update salesman stock
+                for item in instance.items.all():
+                    item._update_salesman_stock()
+            elif old_status == 'delivered' and new_status in ['pending', 'cancelled']:
+                # When changing from delivered, reverse stock allocation
+                for item in instance.items.all():
+                    item._update_salesman_stock(reverse=True)
+        
+        serializer.save()
+    
+    def perform_destroy(self, serializer):
+        """Only allow deletion of pending deliveries"""
+        instance = self.get_object()
+        if instance.status != 'pending':
+            raise serializers.ValidationError(
+                "Only pending deliveries can be deleted"
+            )
+        instance.delete()
+    
+    @action(detail=True, methods=['post'])
+    def mark_delivered(self, request, pk=None):
+        """Mark a delivery as delivered"""
+        delivery = self.get_object()
+        
+        if delivery.status != 'pending':
+            return Response(
+                {'error': 'Only pending deliveries can be marked as delivered'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        delivery.status = 'delivered'
+        delivery.save()
+        
+        # Update salesman stock for all items
+        for item in delivery.items.all():
+            item._update_salesman_stock()
+        
+        serializer = self.get_serializer(delivery)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Cancel a delivery"""
+        delivery = self.get_object()
+        
+        if delivery.status == 'delivered':
+            # Reverse stock allocation if delivery was already delivered
+            for item in delivery.items.all():
+                item._update_salesman_stock(reverse=True)
+        
+        delivery.status = 'cancelled'
+        delivery.save()
+        
+        serializer = self.get_serializer(delivery)
+        return Response(serializer.data)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List delivery items",
+        description="Get a list of items in deliveries",
+        parameters=[
+            OpenApiParameter(name='delivery', description='Filter by delivery ID', required=False, type=int),
+            OpenApiParameter(name='product', description='Filter by product ID', required=False, type=int),
+        ]
+    ),
+    create=extend_schema(
+        summary="Add item to delivery",
+        description="Add a product item to an existing delivery"
+    ),
+    update=extend_schema(
+        summary="Update delivery item",
+        description="Update quantity or unit price of a delivery item"
+    ),
+    destroy=extend_schema(
+        summary="Remove item from delivery",
+        description="Remove a product item from a delivery"
+    )
+)
+class DeliveryItemViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing individual items in deliveries.
+    
+    Allows adding, updating, and removing products from deliveries.
+    """
+    queryset = DeliveryItem.objects.all()
+    serializer_class = DeliveryItemSerializer
+    permission_classes = [IsOwnerOrDeveloper]  # Only owners can manage delivery items
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['delivery', 'product']
+    
+    def get_queryset(self):
+        """Filter delivery items based on user role"""
+        queryset = super().get_queryset()
+        user = self.request.user
+        
+        if user.role == 'owner':
+            # Filter by deliveries under this owner's salesmen
+            return queryset.filter(delivery__salesman__owner=user.owner_profile)
+        elif user.role == 'developer':
+            return queryset
+        else:
+            return queryset.none()
+    
+    def perform_create(self, serializer):
+        """Validate delivery item creation"""
+        delivery = serializer.validated_data['delivery']
+        
+        if delivery.status != 'pending':
+            raise serializers.ValidationError(
+                "Cannot add items to a delivery that is not pending"
+            )
+        
+        serializer.save()
+    
+    def perform_update(self, serializer):
+        """Validate delivery item updates"""
+        instance = self.get_object()
+        
+        if instance.delivery.status != 'pending':
+            raise serializers.ValidationError(
+                "Cannot update items in a delivery that is not pending"
+            )
+        
+        serializer.save()
+    
+    def perform_destroy(self, serializer):
+        """Validate delivery item deletion"""
+        instance = self.get_object()
+        
+        if instance.delivery.status != 'pending':
+            raise serializers.ValidationError(
+                "Cannot remove items from a delivery that is not pending"
+            )
+        
+        instance.delete()

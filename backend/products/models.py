@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from accounts.models import Owner, Salesman
 
 User = get_user_model()
@@ -136,3 +137,150 @@ class StockMovement(models.Model):
     class Meta:
         db_table = 'stock_movements'
         ordering = ['-created_at']
+
+
+class Delivery(models.Model):
+    """Track product deliveries from owner to salesmen"""
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('delivered', 'Delivered'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    delivery_number = models.CharField(max_length=50, unique=True)
+    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='deliveries')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    delivery_date = models.DateField()
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Delivery #{self.delivery_number} - {self.salesman.name}"
+    
+    def save(self, *args, **kwargs):
+        if not self.delivery_number:
+            # Generate delivery number (DEL-YYYYMMDD-XXX)
+            today = timezone.now().date()
+            date_str = today.strftime('%Y%m%d')
+            
+            # Find the latest delivery for today
+            latest = Delivery.objects.filter(
+                delivery_number__startswith=f'DEL-{date_str}'
+            ).order_by('-delivery_number').first()
+            
+            if latest:
+                # Extract sequence number and increment
+                sequence = int(latest.delivery_number.split('-')[-1]) + 1
+            else:
+                sequence = 1
+                
+            self.delivery_number = f'DEL-{date_str}-{sequence:03d}'
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def total_items(self):
+        """Get total number of items in this delivery"""
+        return self.items.aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+    
+    @property
+    def total_value(self):
+        """Calculate total value of delivery"""
+        return sum(item.total_value for item in self.items.all())
+    
+    class Meta:
+        db_table = 'deliveries'
+        ordering = ['-created_at']
+        verbose_name_plural = 'Deliveries'
+
+
+class DeliveryItem(models.Model):
+    """Individual items in a delivery"""
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    quantity = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    
+    def __str__(self):
+        return f"{self.delivery.delivery_number} - {self.product.name} x {self.quantity}"
+    
+    @property
+    def total_value(self):
+        """Calculate total value for this item"""
+        return float(self.quantity * self.unit_price)
+    
+    def save(self, *args, **kwargs):
+        # Set unit price to product's base price if not provided
+        if not self.unit_price:
+            self.unit_price = self.product.base_price
+        
+        is_new = self.pk is None
+        old_quantity = 0
+        
+        if not is_new:
+            # Get old quantity for stock adjustment
+            old_item = DeliveryItem.objects.get(pk=self.pk)
+            old_quantity = old_item.quantity
+        
+        super().save(*args, **kwargs)
+        
+        # Update salesman stock when delivery item is saved
+        if self.delivery.status == 'delivered':
+            self._update_salesman_stock(old_quantity)
+    
+    def delete(self, *args, **kwargs):
+        # Reverse stock allocation when item is deleted
+        if self.delivery.status == 'delivered':
+            self._update_salesman_stock(0, reverse=True)
+        super().delete(*args, **kwargs)
+    
+    def _update_salesman_stock(self, old_quantity=0, reverse=False):
+        """Update salesman stock allocation"""
+        try:
+            salesman_stock, created = SalesmanStock.objects.get_or_create(
+                salesman=self.delivery.salesman,
+                product=self.product,
+                defaults={
+                    'allocated_quantity': 0,
+                    'available_quantity': 0
+                }
+            )
+            
+            if reverse:
+                # Remove allocation
+                quantity_change = -self.quantity
+            else:
+                # Add or adjust allocation
+                quantity_change = self.quantity - old_quantity
+            
+            salesman_stock.allocated_quantity += quantity_change
+            salesman_stock.available_quantity += quantity_change
+            
+            # Ensure quantities don't go negative
+            salesman_stock.allocated_quantity = max(0, salesman_stock.allocated_quantity)
+            salesman_stock.available_quantity = max(0, salesman_stock.available_quantity)
+            
+            salesman_stock.save()
+            
+            # Create stock movement record
+            StockMovement.objects.create(
+                product=self.product,
+                movement_type='allocation',
+                quantity=quantity_change,
+                reference_id=self.delivery.delivery_number,
+                salesman=self.delivery.salesman,
+                notes=f"Delivery allocation: {self.delivery.delivery_number}",
+                created_by=self.delivery.created_by
+            )
+            
+        except Exception as e:
+            print(f"Error updating salesman stock: {e}")
+    
+    class Meta:
+        db_table = 'delivery_items'
+        unique_together = ['delivery', 'product']

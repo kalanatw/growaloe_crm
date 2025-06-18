@@ -175,6 +175,25 @@ class ShopSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def validate(self, data):
+        """Validate shop margin based on user permissions"""
+        from core.models import CompanySettings
+        
+        request = self.context.get('request')
+        shop_margin = data.get('shop_margin', 0)
+        
+        # Only validate for salesmen, owners have no restrictions
+        if request and request.user.role == 'salesman':
+            settings = CompanySettings.get_settings()
+            max_margin = settings.max_shop_margin_for_salesmen
+            
+            if shop_margin > max_margin:
+                raise serializers.ValidationError({
+                    'shop_margin': f'Salesmen cannot set shop margin above {max_margin}%. Current: {shop_margin}%'
+                })
+        
+        return data
 
 
 class MarginPolicySerializer(serializers.ModelSerializer):

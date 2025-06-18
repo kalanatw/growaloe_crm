@@ -318,11 +318,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             # Total Product Price (sum of all item totals)
             product_total = sum(item.total_price for item in invoice.items.all())
             
-            # Shop margin calculation - get from first item (all items should have same shop margin)
-            items = invoice.items.all()
-            shop_margin_percent = Decimal('0.00')
-            if items.exists():
-                shop_margin_percent = items.first().shop_margin or Decimal('0.00')
+            # Shop margin calculation - use invoice-level shop margin
+            shop_margin_percent = invoice.shop_margin or Decimal('0.00')
             
             shop_margin_amount = product_total * (shop_margin_percent / Decimal('100'))
             after_margin = product_total - shop_margin_amount

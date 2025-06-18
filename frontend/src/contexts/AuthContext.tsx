@@ -65,6 +65,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const login = async (username: string, password: string) => {
     try {
+      // Clear any existing user data first
+      logout();
+      
       const response = await authService.login(username, password);
       const { access, refresh } = response;
 

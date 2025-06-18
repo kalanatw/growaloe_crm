@@ -34,21 +34,40 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
                 f"Product {product.name} is not active"
             )
         
-        # For salesmen, check stock availability
+        # For salesmen, check stock availability from deliveries
         request = self.context.get('request')
-        if request and request.user.role == 'SALESMAN':
-            try:
-                stock = SalesmanStock.objects.get(
-                    salesman=request.user.salesman_profile,
-                    product=product
-                )
-                if quantity > stock.available_quantity:
-                    raise serializers.ValidationError(
-                        f"Insufficient stock. Available: {stock.available_quantity}, Requested: {quantity}"
-                    )
-            except SalesmanStock.DoesNotExist:
+        if request and request.user.role == 'salesman':
+            from products.models import DeliveryItem
+            from sales.models import InvoiceItem
+            from django.db.models import Sum
+            
+            salesman = request.user.salesman_profile
+            
+            # Get total delivered quantity for this product to this salesman
+            # Include both pending and delivered status since owners can allocate products
+            delivered_qty = DeliveryItem.objects.filter(
+                delivery__salesman=salesman,
+                delivery__status__in=['pending', 'delivered'],
+                product=product
+            ).aggregate(total_delivered=Sum('quantity'))['total_delivered'] or 0
+            
+            # Get total sold quantity for this product by this salesman
+            sold_qty = InvoiceItem.objects.filter(
+                invoice__salesman=salesman,
+                product=product
+            ).aggregate(total_sold=Sum('quantity'))['total_sold'] or 0
+            
+            # Calculate available quantity
+            available_qty = delivered_qty - sold_qty
+            
+            if delivered_qty == 0:
                 raise serializers.ValidationError(
                     f"Product {product.name} not allocated to this salesman"
+                )
+            
+            if quantity > available_qty:
+                raise serializers.ValidationError(
+                    f"Insufficient stock. Available: {available_qty}, Requested: {quantity}"
                 )
         
         return data
@@ -66,7 +85,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'invoice_number', 'salesman', 'salesman_name', 'shop', 'shop_name',
             'invoice_date', 'due_date', 'subtotal', 'tax_amount', 'discount_amount',
-            'net_total', 'paid_amount', 'balance_due', 'total_amount', 'status', 
+            'shop_margin', 'net_total', 'paid_amount', 'balance_due', 'total_amount', 'status', 
             'notes', 'terms_conditions', 'created_by', 'created_at', 'updated_at',
             'items', 'items_count'
         ]
@@ -101,9 +120,30 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Invoice
         fields = [
-            'shop', 'due_date', 'tax_amount',
-            'discount_amount', 'notes', 'terms_conditions', 'items'
+            'id', 'invoice_number', 'shop', 'due_date', 'tax_amount',
+            'discount_amount', 'shop_margin', 'notes', 'terms_conditions', 'items',
+            'subtotal', 'net_total', 'total_amount'
         ]
+        read_only_fields = ['id', 'invoice_number', 'subtotal', 'net_total', 'total_amount']
+    
+    def validate(self, data):
+        """Validate shop margin based on user permissions"""
+        from core.models import CompanySettings
+        
+        request = self.context.get('request')
+        shop_margin = data.get('shop_margin', 0)
+        
+        # Only validate for salesmen, owners have no restrictions
+        if request and request.user.role == 'salesman':
+            settings = CompanySettings.get_settings()
+            max_margin = settings.max_shop_margin_for_salesmen
+            
+            if shop_margin > max_margin:
+                raise serializers.ValidationError({
+                    'shop_margin': f'Salesmen cannot set shop margin above {max_margin}%. Current: {shop_margin}%'
+                })
+        
+        return data
     
     def create(self, validated_data):
         from products.models import StockMovement
@@ -125,42 +165,22 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
         
         invoice = Invoice.objects.create(**validated_data)
         
-        # Create invoice items and update stock
+        # Create invoice items and create stock movement records
         for item_data in items_data:
             # Create invoice item
             invoice_item = InvoiceItem.objects.create(invoice=invoice, **item_data)
             
-            # Update salesman stock (reduce available quantity)
+            # Create stock movement record for the sale
             if invoice.salesman:
-                try:
-                    stock = SalesmanStock.objects.get(
-                        salesman=invoice.salesman,
-                        product=invoice_item.product
-                    )
-                    if stock.available_quantity >= invoice_item.quantity:
-                        stock.available_quantity -= invoice_item.quantity
-                        stock.save()
-                        
-                        # Create stock movement record
-                        StockMovement.objects.create(
-                            product=invoice_item.product,
-                            salesman=invoice.salesman,
-                            movement_type='sale',
-                            quantity=-invoice_item.quantity,  # Negative for outward movement
-                            reference_id=invoice.invoice_number,
-                            notes=f'Sale via invoice {invoice.invoice_number}',
-                            created_by=request.user if request else None
-                        )
-                    else:
-                        # This should be caught by validation, but just in case
-                        raise serializers.ValidationError(
-                            f'Insufficient stock for {invoice_item.product.name}. '
-                            f'Available: {stock.available_quantity}, Requested: {invoice_item.quantity}'
-                        )
-                except SalesmanStock.DoesNotExist:
-                    raise serializers.ValidationError(
-                        f'Product {invoice_item.product.name} not allocated to salesman {invoice.salesman.name}'
-                    )
+                StockMovement.objects.create(
+                    product=invoice_item.product,
+                    salesman=invoice.salesman,
+                    movement_type='sale',
+                    quantity=-invoice_item.quantity,  # Negative for outward movement
+                    reference_id=invoice.invoice_number,
+                    notes=f'Sale via invoice {invoice.invoice_number}',
+                    created_by=request.user if request else None
+                )
         
         # Calculate totals
         invoice.calculate_totals()

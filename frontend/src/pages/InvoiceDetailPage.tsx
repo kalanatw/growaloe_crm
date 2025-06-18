@@ -119,7 +119,11 @@ export const InvoiceDetailPage: React.FC = () => {
     );
   }
 
-  const subtotal = invoice.items?.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0) || 0;
+  // Calculate raw subtotal before margin
+  const rawSubtotal = invoice.items?.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0) || 0;
+  const shopMargin = invoice.shop_margin || 0;
+  const shopMarginAmount = rawSubtotal * (shopMargin / 100);
+  const subtotal = invoice.subtotal || (rawSubtotal - shopMarginAmount); // Use backend calculated subtotal
   const taxAmount = invoice.tax_amount || 0;
   const discountAmount = invoice.discount_amount || 0;
   const total = invoice.total_amount;
@@ -261,6 +265,16 @@ export const InvoiceDetailPage: React.FC = () => {
             <div className="flex justify-end">
               <div className="w-full max-w-sm">
                 <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600 dark:text-gray-400">Products Total:</span>
+                    <span className="text-gray-900 dark:text-white">{formatCurrency(rawSubtotal)}</span>
+                  </div>
+                  {shopMargin > 0 && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-600 dark:text-gray-400">Shop Margin ({shopMargin}%):</span>
+                      <span className="text-gray-900 dark:text-white">-{formatCurrency(shopMarginAmount)}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between text-sm">
                     <span className="text-gray-600 dark:text-gray-400">Subtotal:</span>
                     <span className="text-gray-900 dark:text-white">{formatCurrency(subtotal)}</span>

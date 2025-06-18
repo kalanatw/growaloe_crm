@@ -405,13 +405,33 @@ class ShopViewSet(viewsets.ModelViewSet):
                 serializer.save(salesman=salesman)
             except Salesman.DoesNotExist:
                 # This shouldn't happen for authenticated salesmen, but handle gracefully
-                from rest_framework.exceptions import ValidationError
                 raise ValidationError({'detail': 'Salesman profile not found'})
-        else:
-            # For owners/developers, require salesman_id to be provided
+        elif self.request.user.role == 'owner':
+            # For owners, auto-assign to first salesman if not specified
             salesman_id = serializer.validated_data.get('salesman_id')
             if not salesman_id:
-                from rest_framework.exceptions import ValidationError
+                try:
+                    owner = self.request.user.owner_profile
+                    # Get the first active salesman under this owner
+                    first_salesman = Salesman.objects.filter(owner=owner, is_active=True).first()
+                    if first_salesman:
+                        serializer.save(salesman=first_salesman)
+                    else:
+                        raise ValidationError({'detail': 'No active salesmen found under this owner. Please create a salesman first or specify salesman_id.'})
+                except Owner.DoesNotExist:
+                    raise ValidationError({'detail': 'Owner profile not found'})
+            else:
+                # Owner specified a salesman_id, validate it belongs to them
+                try:
+                    owner = self.request.user.owner_profile
+                    salesman = Salesman.objects.get(id=salesman_id, owner=owner)
+                    serializer.save(salesman=salesman)
+                except (Owner.DoesNotExist, Salesman.DoesNotExist):
+                    raise ValidationError({'salesman_id': 'Invalid salesman or salesman does not belong to this owner'})
+        else:
+            # For other roles, require salesman_id to be provided
+            salesman_id = serializer.validated_data.get('salesman_id')
+            if not salesman_id:
                 raise ValidationError({'salesman_id': 'This field is required for non-salesman users'})
             serializer.save()
     

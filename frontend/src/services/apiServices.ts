@@ -19,6 +19,8 @@ import {
   AnalyticsData,
   CompanySettings,
   UpdateCompanySettingsData,
+  Delivery,
+  CreateDeliveryData,
 } from '../types';
 
 export const authService = {
@@ -101,6 +103,16 @@ export const productService = {
     };
   }> => {
     return apiClient.get('/products/salesman-stock/my_stock/');
+  },
+
+  getAllAvailableStock: async (): Promise<{
+    stocks: SalesmanStock[];
+    summary: {
+      total_products: number;
+      total_available_quantity: number;
+    };
+  }> => {
+    return apiClient.get('/products/salesman-stock/all_available_stock/');
   },
 
   getCategories: async (): Promise<{ results: Category[] }> => {
@@ -248,16 +260,14 @@ export const analyticsService = {
     return apiClient.get<SalesAnalytics[]>('/sales/analytics/sales_performance/');
   },
 
-  getMonthlyTrends: async (): Promise<MonthlyTrend[]> => {
-    return apiClient.get<MonthlyTrend[]>('/sales/analytics/monthly_trends/');
+  getAnalytics: async (params: { period: string }): Promise<any> => {
+    // For now, return sales performance data as a fallback
+    return apiClient.get('/sales/analytics/sales_performance/', { params });
   },
 
-  getTopProducts: async (): Promise<TopProduct[]> => {
-    return apiClient.get<TopProduct[]>('/sales/analytics/top_products/');
-  },
-
-  getAnalytics: async (params?: { period?: string }): Promise<AnalyticsData> => {
-    return apiClient.get<AnalyticsData>('/sales/analytics/dashboard/', params);
+  getMonthlyTrends: async (): Promise<any[]> => {
+    // For now, return sales performance data as monthly trends
+    return apiClient.get('/sales/analytics/sales_performance/');
   },
 };
 
@@ -302,5 +312,45 @@ export const companySettingsService = {
 
   getTemplatePreview: async (): Promise<any> => {
     return apiClient.get('/core/settings/template_preview/');
+  },
+};
+
+export const companyService = {
+  getPublicSettings: async (): Promise<{
+    company_name: string;
+    company_address: string;
+    company_phone: string;
+    company_email: string;
+    currency_symbol: string;
+    default_currency: string;
+    max_shop_margin_for_salesmen: number;
+  }> => {
+    return apiClient.get('/core/settings/public/');
+  },
+};
+
+export const deliveryService = {
+  getDeliveries: async (): Promise<{ results: Delivery[] }> => {
+    return apiClient.get<{ results: Delivery[] }>('/products/deliveries/');
+  },
+
+  getDelivery: async (id: number): Promise<Delivery> => {
+    return apiClient.get<Delivery>(`/products/deliveries/${id}/`);
+  },
+
+  createDelivery: async (data: CreateDeliveryData): Promise<Delivery> => {
+    return apiClient.post<Delivery>('/products/deliveries/', data);
+  },
+
+  updateDelivery: async (id: number, data: Partial<CreateDeliveryData>): Promise<Delivery> => {
+    return apiClient.put<Delivery>(`/products/deliveries/${id}/`, data);
+  },
+
+  deleteDelivery: async (id: number): Promise<void> => {
+    return apiClient.delete(`/products/deliveries/${id}/`);
+  },
+
+  markAsDelivered: async (id: number): Promise<Delivery> => {
+    return apiClient.post<Delivery>(`/products/deliveries/${id}/mark_delivered/`);
   },
 };

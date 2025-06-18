@@ -11,6 +11,7 @@ import {
   X,
   UserPlus,
   Receipt,
+  Truck,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -35,6 +36,7 @@ const navigation = [
 // Owner-only navigation items
 const ownerNavigation = [
   { name: 'Manage Salesmen', href: '/salesmen', icon: UserPlus },
+  { name: 'Product Deliveries', href: '/deliveries', icon: Truck },
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {

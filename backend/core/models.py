@@ -38,6 +38,14 @@ class CompanySettings(models.Model):
     default_currency = models.CharField(max_length=3, default="USD")
     currency_symbol = models.CharField(max_length=5, default="$")
     
+    # Margin Settings
+    max_shop_margin_for_salesmen = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=Decimal('20.00'),
+        help_text="Maximum shop margin percentage that salesmen can set (owners have no restrictions)"
+    )
+    
     # Payment Terms
     default_payment_terms = models.TextField(
         blank=True,

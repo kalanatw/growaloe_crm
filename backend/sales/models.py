@@ -31,6 +31,7 @@ class Invoice(models.Model):
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    shop_margin = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)  # Percentage
     net_total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     balance_due = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
@@ -86,10 +87,8 @@ class Invoice(models.Model):
             for item in items
         ) or Decimal('0.00')
         
-        # Get shop margin from the first item (all items should have the same shop margin)
-        shop_margin_percent = Decimal('0.00')
-        if items.exists():
-            shop_margin_percent = items.first().shop_margin or Decimal('0.00')
+        # Use invoice-level shop margin
+        shop_margin_percent = Decimal(str(self.shop_margin)) or Decimal('0.00')
         
         # Calculate margin amount: total_product_price * shop_margin_percent / 100
         margin_amount = total_product_price * (shop_margin_percent / Decimal('100'))
@@ -104,6 +103,11 @@ class Invoice(models.Model):
         """Check if invoice is overdue"""
         from datetime import date
         return self.due_date and self.due_date < date.today() and self.balance_due > 0
+    
+    @property
+    def total_amount(self):
+        """Get the total amount of the invoice (alias for net_total)"""
+        return self.net_total
     
     def get_total_amount(self):
         """Get the total amount of the invoice"""

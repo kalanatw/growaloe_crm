@@ -13,10 +13,11 @@ import {
   Building2,
   Package
 } from 'lucide-react';
-import { shopService, productService, invoiceService } from '../services/apiServices';
+import { shopService, productService, invoiceService, companyService } from '../services/apiServices';
 import { Shop, SalesmanStock, CreateInvoiceData } from '../types';
 import toast from 'react-hot-toast';
 import { formatCurrency } from '../utils/currency';
+import { useAuth } from '../contexts/AuthContext';
 
 interface InvoiceItem {
   id: string;
@@ -34,6 +35,7 @@ interface ProductSelectionState {
 
 export const NewCreateInvoicePage: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   
   // State management
   const [selectedShop, setSelectedShop] = useState<Shop | null>(null);
@@ -69,6 +71,10 @@ export const NewCreateInvoicePage: React.FC = () => {
     notes: '',
     terms_conditions: ''
   });
+
+  // Company settings
+  const [maxShopMargin, setMaxShopMargin] = useState<number>(20); // Default to 20%
+  const userRole = user?.role || 'salesman'; // Get role from auth context
 
   useEffect(() => {
     loadInitialData();
@@ -123,13 +129,21 @@ export const NewCreateInvoicePage: React.FC = () => {
   const loadInitialData = async () => {
     try {
       setIsLoading(true);
-      const [shopsData, stockDataResponse] = await Promise.all([
+      
+      // Choose the appropriate stock endpoint based on user role
+      const stockPromise = userRole === 'owner' || userRole === 'developer' 
+        ? productService.getAllAvailableStock()
+        : productService.getMySalesmanStock();
+      
+      const [shopsData, stockDataResponse, companySettings] = await Promise.all([
         shopService.getShops(),
-        productService.getMySalesmanStock(),
+        stockPromise,
+        companyService.getPublicSettings(),
       ]);
 
       setShops(shopsData.results);
       setStockData(stockDataResponse.stocks);
+      setMaxShopMargin(companySettings.max_shop_margin_for_salesmen);
     } catch (error) {
       console.error('Error loading data:', error);
       toast.error('Failed to load data');
@@ -285,6 +299,12 @@ export const NewCreateInvoicePage: React.FC = () => {
       return;
     }
 
+    // Validate shop margin for salesmen
+    if (userRole === 'salesman' && invoiceDetails.shop_margin > maxShopMargin) {
+      toast.error(`Shop margin cannot exceed ${maxShopMargin}% for salesmen`);
+      return;
+    }
+
     // Validate stock availability
     for (const item of invoiceItems) {
       if (item.quantity > item.product.available_quantity) {
@@ -301,6 +321,7 @@ export const NewCreateInvoicePage: React.FC = () => {
         due_date: invoiceDetails.due_date || undefined,
         tax_amount: invoiceDetails.tax_amount,
         discount_amount: invoiceDetails.discount_amount,
+        shop_margin: invoiceDetails.shop_margin,
         notes: invoiceDetails.notes,
         terms_conditions: invoiceDetails.terms_conditions,
         items: invoiceItems.map(item => ({
@@ -308,7 +329,7 @@ export const NewCreateInvoicePage: React.FC = () => {
           quantity: item.quantity,
           unit_price: item.unit_price,
           salesman_margin: 0, // No individual salesman margins
-          shop_margin: invoiceDetails.shop_margin, // Shop margin applied at invoice level
+          shop_margin: 0, // Shop margin applied at invoice level now
         })),
       };
 
@@ -606,14 +627,30 @@ export const NewCreateInvoicePage: React.FC = () => {
                           type="number"
                           step="0.1"
                           min="0"
-                          max="100"
+                          max={userRole === 'salesman' ? maxShopMargin : 100}
                           value={invoiceDetails.shop_margin}
-                          onChange={(e) => setInvoiceDetails(prev => ({ ...prev, shop_margin: parseFloat(e.target.value) || 0 }))}
-                          className="input"
+                          onChange={(e) => {
+                            const value = parseFloat(e.target.value) || 0;
+                            if (userRole === 'salesman' && value > maxShopMargin) {
+                              toast.error(`Salesmen cannot set shop margin above ${maxShopMargin}%`);
+                              return;
+                            }
+                            setInvoiceDetails(prev => ({ ...prev, shop_margin: value }));
+                          }}
+                          className={`input ${
+                            userRole === 'salesman' && invoiceDetails.shop_margin > maxShopMargin 
+                              ? 'border-red-500 focus:border-red-500' 
+                              : ''
+                          }`}
                           placeholder="0.0"
                         />
                         <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
                           Shop margin to be applied to the total price
+                          {userRole === 'salesman' && (
+                            <span className="block text-orange-600 dark:text-orange-400">
+                              Maximum allowed for salesmen: {maxShopMargin}%
+                            </span>
+                          )}
                         </p>
                       </div>
                       <div>

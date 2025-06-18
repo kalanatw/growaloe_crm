@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, SalesmanStock, StockMovement
+from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem, Delivery, DeliveryItem
 
 User = get_user_model()
 
@@ -110,3 +110,83 @@ class SalesmanStockSummarySerializer(serializers.Serializer):
     total_products = serializers.IntegerField()
     total_stock_value = serializers.DecimalField(max_digits=15, decimal_places=2)
     products = ProductSerializer(many=True, read_only=True)
+
+
+class DeliveryItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    product_base_price = serializers.DecimalField(source='product.base_price', max_digits=10, decimal_places=2, read_only=True)
+    total_value = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = DeliveryItem
+        fields = [
+            'id', 'product', 'product_name', 'product_sku', 'product_base_price',
+            'quantity', 'unit_price', 'total_value'
+        ]
+        read_only_fields = ['id', 'product_name', 'product_sku', 'product_base_price', 'total_value']
+    
+    @extend_schema_field(serializers.DecimalField)
+    def get_total_value(self, obj):
+        return obj.total_value
+
+
+class DeliverySerializer(serializers.ModelSerializer):
+    items = DeliveryItemSerializer(many=True, read_only=True)
+    salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    total_items = serializers.SerializerMethodField(read_only=True)
+    total_value = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = Delivery
+        fields = [
+            'id', 'delivery_number', 'salesman', 'salesman_name', 'status',
+            'delivery_date', 'notes', 'created_by', 'created_by_name',
+            'total_items', 'total_value', 'items', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'delivery_number', 'salesman_name', 'created_by_name',
+            'total_items', 'total_value', 'created_at', 'updated_at'
+        ]
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_total_items(self, obj):
+        return obj.total_items
+    
+    @extend_schema_field(serializers.DecimalField)
+    def get_total_value(self, obj):
+        return obj.total_value
+
+
+class CreateDeliverySerializer(serializers.ModelSerializer):
+    items = DeliveryItemSerializer(many=True)
+    
+    class Meta:
+        model = Delivery
+        fields = ['salesman', 'delivery_date', 'notes', 'items']
+    
+    def validate_items(self, items):
+        if not items:
+            raise serializers.ValidationError("At least one item is required for a delivery.")
+        
+        # Check for duplicate products
+        product_ids = [item['product'].id for item in items]
+        if len(product_ids) != len(set(product_ids)):
+            raise serializers.ValidationError("Duplicate products are not allowed in a delivery.")
+        
+        # Validate quantities
+        for item in items:
+            if item['quantity'] <= 0:
+                raise serializers.ValidationError("Quantity must be greater than 0.")
+        
+        return items
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop('items')
+        delivery = Delivery.objects.create(**validated_data)
+        
+        for item_data in items_data:
+            DeliveryItem.objects.create(delivery=delivery, **item_data)
+        
+        return delivery

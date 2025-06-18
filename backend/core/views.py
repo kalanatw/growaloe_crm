@@ -48,10 +48,11 @@ class CompanySettingsViewSet(viewsets.GenericViewSet):
         """Update company settings"""
         settings = self.get_object()
         serializer = self.get_serializer(settings, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
         
-        return Response(serializer.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     @extend_schema(
         summary="Reset to default settings",
@@ -131,3 +132,24 @@ class CompanySettingsViewSet(viewsets.GenericViewSet):
         }
         
         return Response(preview_data)
+    
+    @extend_schema(
+        summary="Get public company settings",
+        description="Get basic company settings that are accessible to all authenticated users",
+        responses={200: CompanySettingsSerializer},
+        tags=['Company Settings']
+    )
+    @action(detail=False, methods=['get'], permission_classes=[])
+    def public(self, request):
+        """Get public company settings (no authentication required)"""
+        settings = self.get_object()
+        public_data = {
+            'company_name': settings.company_name,
+            'company_address': settings.company_address,
+            'company_phone': settings.company_phone,
+            'company_email': settings.company_email,
+            'currency_symbol': settings.currency_symbol,
+            'default_currency': settings.default_currency,
+            'max_shop_margin_for_salesmen': settings.max_shop_margin_for_salesmen,
+        }
+        return Response(public_data)
