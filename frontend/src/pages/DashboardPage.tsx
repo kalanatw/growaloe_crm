@@ -14,6 +14,7 @@ import { productService, invoiceService, shopService, analyticsService } from '.
 import { SalesmanStock, Invoice, Shop, MonthlyTrend } from '../types';
 import { format } from 'date-fns';
 import { formatCurrency } from '../utils/currency';
+import { getResponsiveFontSize, getCardAmountClass } from '../utils/responsiveFonts';
 
 interface DashboardStats {
   totalProducts: number;
@@ -158,7 +159,7 @@ export const DashboardPage: React.FC = () => {
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                       {stat.name}
                     </p>
-                    <p className="text-2xl font-semibold text-gray-900 dark:text-white">
+                    <p className={getCardAmountClass(stat.value)}>
                       {stat.value}
                     </p>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -196,7 +197,7 @@ export const DashboardPage: React.FC = () => {
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="font-semibold text-gray-900 dark:text-white">
+                      <p className={getCardAmountClass(invoice.net_total)}>
                         {formatCurrency(invoice.net_total, { useLocaleString: true })}
                       </p>
                       <span
@@ -242,7 +243,7 @@ export const DashboardPage: React.FC = () => {
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="font-semibold text-gray-900 dark:text-white">
+                      <p className={getCardAmountClass(trend.total_sales)}>
                         {formatCurrency(trend.total_sales, { useLocaleString: true })}
                       </p>
                     </div>

@@ -8,6 +8,7 @@ import { Invoice } from '../types';
 import { INVOICE_STATUS } from '../config/constants';
 import { format } from 'date-fns';
 import { formatCurrency } from '../utils/currency';
+import { getCardAmountClass, getTableAmountClass } from '../utils/responsiveFonts';
 import toast from 'react-hot-toast';
 
 export const InvoicesPage: React.FC = () => {
@@ -151,7 +152,7 @@ export const InvoicesPage: React.FC = () => {
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                   Total Value
                 </p>
-                <p className="text-2xl font-semibold text-gray-900 dark:text-white">
+                <p className={`${getCardAmountClass(totalAmount)} text-gray-900 dark:text-white`}>
                   {formatCurrency(totalAmount, { useLocaleString: true })}
                 </p>
               </div>
@@ -254,7 +255,7 @@ export const InvoicesPage: React.FC = () => {
                         )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900 dark:text-white">
+                        <div className={`${getTableAmountClass(invoice.net_total)} text-gray-900 dark:text-white`}>
                           {formatCurrency(invoice.net_total, { useLocaleString: true })}
                         </div>
                         {invoice.paid_amount > 0 && (

@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import CompanySettings
+from .models import CompanySettings, FinancialTransaction, FinancialSummary
+from sales.models import InvoiceSettlement
 
 
 class CompanySettingsSerializer(serializers.ModelSerializer):
@@ -29,3 +30,43 @@ class CompanySettingsSerializer(serializers.ModelSerializer):
         if not value.startswith('#') or len(value) != 7:
             raise serializers.ValidationError("Color must be in hex format (e.g., #6c757d)")
         return value
+
+
+class FinancialTransactionSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    
+    class Meta:
+        model = FinancialTransaction
+        fields = [
+            'id', 'transaction_type', 'date', 'description', 'amount', 'category',
+            'reference_number', 'invoice_id', 'notes', 'created_by', 'created_by_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
+
+
+class InvoiceSettlementSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    shop_name = serializers.CharField(source='invoice.shop.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.username', read_only=True)
+    
+    class Meta:
+        model = InvoiceSettlement
+        fields = [
+            'id', 'invoice', 'invoice_number', 'shop_name', 'settlement_date',
+            'amount', 'payment_method', 'reference_number', 'bank_name',
+            'cheque_date', 'notes', 'created_by', 'created_by_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
+
+
+class FinancialSummarySerializer(serializers.ModelSerializer):
+    
+    class Meta:
+        model = FinancialSummary
+        fields = [
+            'id', 'start_date', 'end_date', 'total_debits', 'total_credits',
+            'net_balance', 'total_invoices', 'total_settlements', 'outstanding_balance',
+            'actual_income', 'cash_flow', 'created_at', 'updated_at'
+        ]

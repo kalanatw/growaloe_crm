@@ -3,14 +3,14 @@ from rest_framework import permissions
 
 class IsOwnerOrDeveloper(permissions.BasePermission):
     """
-    Permission class that allows access only to owners and developers
+    Permission class that allows access only to owners, developers, and superusers
     """
     
     def has_permission(self, request, view):
         return (
             request.user and 
             request.user.is_authenticated and 
-            request.user.role in ['owner', 'developer']
+            (request.user.role in ['owner', 'developer'] or request.user.is_superuser)
         )
 
 

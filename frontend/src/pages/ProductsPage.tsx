@@ -6,25 +6,38 @@ import {
   AlertTriangle, 
   Plus, 
   Search, 
-  Filter, 
-  SortAsc, 
-  SortDesc, 
   Eye, 
   Edit, 
   Trash2, 
   DollarSign, 
-  Tag, 
-  Image,
   X,
-  Calculator
+  RefreshCw
 } from 'lucide-react';
 import { productService } from '../services/apiServices';
-import { Product, SalesmanStock, Category, CreateProductData, ProfitCalculation } from '../types';
+import { Product, SalesmanStock, Category, CreateProductData } from '../types';
 import { formatCurrency } from '../utils/currency';
 import { useAuth } from '../contexts/AuthContext';
 import { USER_ROLES } from '../config/constants';
 import toast from 'react-hot-toast';
 import { useForm } from 'react-hook-form';
+
+// Unified product/stock item interface for table display
+interface UnifiedProductItem {
+  id: number;
+  name: string;
+  sku: string;
+  category_name?: string;
+  image_url?: string;
+  base_price: number;
+  stock_quantity: number;
+  allocated_quantity?: number;
+  available_quantity?: number;
+  min_stock_level: number;
+  is_active: boolean;
+  isLowStock: boolean;
+  product?: Product; // Original product for owners
+  stock?: SalesmanStock; // Original stock for salesmen
+}
 
 export const ProductsPage: React.FC = () => {
   const { user } = useAuth();
@@ -35,16 +48,14 @@ export const ProductsPage: React.FC = () => {
     summary: { total_products: number; total_stock_value: number };
   } | null>(null);
   const [stockSummary, setStockSummary] = useState<any>(null);
+  const [unifiedItems, setUnifiedItems] = useState<UnifiedProductItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
-  const [isProfitModalOpen, setIsProfitModalOpen] = useState(false);
+  const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [profitCalculation, setProfitCalculation] = useState<ProfitCalculation | null>(null);
-  const [filter, setFilter] = useState<'all' | 'low_stock' | 'products'>('all');
-  const [view, setView] = useState<'table' | 'cards'>('table');
+  const [restockProduct, setRestockProduct] = useState<UnifiedProductItem | null>(null);
+  const [restockQuantity, setRestockQuantity] = useState<number>(0);
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'stock' | 'price' | 'category'>('name');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -52,9 +63,11 @@ export const ProductsPage: React.FC = () => {
     register,
     handleSubmit,
     reset,
-    watch,
     formState: { errors },
   } = useForm<CreateProductData>();
+
+  const isOwner = user?.role === USER_ROLES.OWNER;
+  const isSalesman = user?.role === USER_ROLES.SALESMAN;
 
   useEffect(() => {
     loadInitialData();
@@ -64,24 +77,31 @@ export const ProductsPage: React.FC = () => {
     try {
       setIsLoading(true);
       
-      if (user?.role === USER_ROLES.OWNER) {
-        // Owner can see all products and stock summary
-        const [productsData, categoriesData, stockSummaryData] = await Promise.all([
-          productService.getProducts(),
-          productService.getCategories(),
-          productService.getProductStockSummary()
-        ]);
+      // Load categories for all users
+      const categoriesData = await productService.getCategories();
+      setCategories(categoriesData.results || categoriesData);
+      
+      if (isOwner) {
+        // Owners see all products
+        const productsData = await productService.getProducts();
         setProducts(productsData.results || []);
-        setCategories(categoriesData.results || categoriesData);
-        setStockSummary(stockSummaryData);
-      } else if (user?.role === USER_ROLES.SALESMAN) {
-        // Salesman can see their allocated stock
-        const [stockData, categoriesData] = await Promise.all([
-          productService.getMySalesmanStock(),
-          productService.getCategories()
-        ]);
-        setStockData(stockData);
-        setCategories(categoriesData.results || categoriesData);
+        
+        // Try to load stock summary
+        try {
+          const stockSummaryData = await productService.getProductStockSummary();
+          setStockSummary(stockSummaryData);
+        } catch (error) {
+          console.log('Stock summary not available');
+        }
+      } else if (isSalesman) {
+        // Salesmen see their allocated stock
+        try {
+          const salesmanStockData = await productService.getMySalesmanStock();
+          setStockData(salesmanStockData);
+        } catch (error) {
+          console.log('Salesman stock not available');
+          setStockData({ stocks: [], summary: { total_products: 0, total_stock_value: 0 } });
+        }
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -91,17 +111,76 @@ export const ProductsPage: React.FC = () => {
     }
   };
 
+  // Create unified items for table display
+  useEffect(() => {
+    const items: UnifiedProductItem[] = [];
+
+    if (isOwner && products.length > 0) {
+      // For owners, show all products with their stock info
+      products.forEach(product => {
+        const isLowStock = product.stock_quantity <= (product.min_stock_level || 5);
+        items.push({
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          category_name: product.category?.name,
+          image_url: product.image_url,
+          base_price: product.base_price,
+          stock_quantity: product.stock_quantity,
+          min_stock_level: product.min_stock_level,
+          is_active: product.is_active,
+          isLowStock,
+          product
+        });
+      });
+    } else if (isSalesman && stockData?.stocks) {
+      // For salesmen, show their allocated stock
+      stockData.stocks.forEach(stock => {
+        const isLowStock = stock.available_quantity <= 5;
+        items.push({
+          id: stock.id,
+          name: stock.product_name,
+          sku: stock.product_sku,
+          base_price: stock.product_base_price,
+          stock_quantity: stock.available_quantity,
+          allocated_quantity: stock.allocated_quantity,
+          available_quantity: stock.available_quantity,
+          min_stock_level: 5, // Default for salesmen
+          is_active: true,
+          isLowStock,
+          stock
+        });
+      });
+    }
+
+    // Sort by low stock first, then by name
+    items.sort((a, b) => {
+      if (a.isLowStock && !b.isLowStock) return -1;
+      if (!a.isLowStock && b.isLowStock) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    setUnifiedItems(items);
+  }, [products, stockData, isOwner, isSalesman]);
+
   const handleCreateProduct = async (data: CreateProductData) => {
     try {
       setIsSubmitting(true);
       
+      // Only require retail price (base_price), set cost_price to 0 if not provided
+      const productData = {
+        ...data,
+        cost_price: 0, // Simplified: no cost price needed
+        unit: data.unit || 'pcs' // Default unit
+      };
+      
       if (selectedProduct) {
         // Update existing product
-        await productService.updateProduct(selectedProduct.id, data);
+        await productService.updateProduct(selectedProduct.id, productData);
         toast.success('Product updated successfully!');
       } else {
         // Create new product
-        await productService.createProduct(data);
+        await productService.createProduct(productData);
         toast.success('Product created successfully!');
       }
       
@@ -117,37 +196,51 @@ export const ProductsPage: React.FC = () => {
     }
   };
 
-  const handleCalculateProfit = async (product: Product) => {
-    try {
-      const salesmanMargin = 10; // Default salesman margin, could be dynamic
-      const shopMargin = 15; // Default shop margin, could be dynamic
-      
-      const basePrice = Number(product.base_price);
-      const costPrice = Number(product.cost_price);
-      
-      // Calculate selling price with margins
-      const salesmanMarginAmount = basePrice * (salesmanMargin / 100);
-      const shopMarginAmount = (basePrice + salesmanMarginAmount) * (shopMargin / 100);
-      const sellingPrice = basePrice + salesmanMarginAmount + shopMarginAmount;
-      
-      const calculation: ProfitCalculation = {
-        cost_price: costPrice,
-        base_price: basePrice,
-        selling_price: sellingPrice,
-        total_profit: sellingPrice - costPrice,
-        salesman_margin_amount: salesmanMarginAmount,
-        shop_margin_amount: shopMarginAmount,
-        owner_profit: basePrice - costPrice,
-        profit_percentage: ((sellingPrice - costPrice) / sellingPrice) * 100
-      };
-
-      setSelectedProduct(product);
-      setProfitCalculation(calculation);
-      setIsProfitModalOpen(true);
-    } catch (error) {
-      console.error('Error calculating profit:', error);
-      toast.error('Failed to calculate profit');
+  const handleRestock = async () => {
+    if (!restockProduct || restockQuantity <= 0) {
+      toast.error('Please enter a valid quantity');
+      return;
     }
+
+    try {
+      setIsSubmitting(true);
+      
+      if (restockProduct.product) {
+        // For owners, update the product's stock quantity
+        const updatedData = {
+          name: restockProduct.product.name,
+          sku: restockProduct.product.sku,
+          description: restockProduct.product.description,
+          category: restockProduct.product.category?.id,
+          base_price: restockProduct.product.base_price,
+          cost_price: restockProduct.product.cost_price,
+          unit: restockProduct.product.unit,
+          stock_quantity: restockProduct.product.stock_quantity + restockQuantity,
+          min_stock_level: restockProduct.product.min_stock_level,
+          image_url: restockProduct.product.image_url,
+          is_active: restockProduct.product.is_active
+        };
+        
+        await productService.updateProduct(restockProduct.product.id, updatedData);
+        toast.success(`Added ${restockQuantity} units to ${restockProduct.name}`);
+      }
+      
+      setIsRestockModalOpen(false);
+      setRestockProduct(null);
+      setRestockQuantity(0);
+      loadInitialData();
+    } catch (error: any) {
+      console.error('Error restocking product:', error);
+      toast.error(error.response?.data?.detail || 'Failed to restock product');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleOpenRestock = (item: UnifiedProductItem) => {
+    setRestockProduct(item);
+    setRestockQuantity(0);
+    setIsRestockModalOpen(true);
   };
 
   const handleEditProduct = (product: Product) => {
@@ -160,6 +253,7 @@ export const ProductsPage: React.FC = () => {
       category: product.category?.id || undefined,
       base_price: product.base_price,
       cost_price: product.cost_price,
+      unit: product.unit,
       stock_quantity: product.stock_quantity,
       min_stock_level: product.min_stock_level,
       image_url: product.image_url || '',
@@ -181,59 +275,30 @@ export const ProductsPage: React.FC = () => {
     }
   };
 
-  const handleViewProduct = (product: Product) => {
-    setSelectedProduct(product);
-    // You can implement a view modal or navigate to a detail page
-    toast(`Viewing product: ${product.name}`, {
-      icon: '👀',
-    });
+  const handleViewProduct = (item: UnifiedProductItem) => {
+    toast(`Viewing: ${item.name}`, { icon: '👀' });
   };
 
-  const isOwner = user?.role === USER_ROLES.OWNER;
-  const isSalesman = user?.role === USER_ROLES.SALESMAN;
-
-  // Filter and sort data based on current view
-  const getFilteredData = () => {
-    let data: any[] = [];
+  // Filter items based on search and category
+  const filteredItems = unifiedItems.filter(item => {
+    const matchesSearch = !searchTerm || 
+      item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      item.sku.toLowerCase().includes(searchTerm.toLowerCase());
     
-    if (isOwner && filter === 'products') {
-      data = products;
-    } else if (isSalesman || filter === 'all' || filter === 'low_stock') {
-      data = stockData?.stocks || [];
-    }
+    const matchesCategory = !selectedCategory || 
+      (item.product?.category?.id === selectedCategory);
 
-    // Apply search filter
-    if (searchTerm) {
-      data = data.filter((item) => {
-        const name = 'product_name' in item ? item.product_name : item.name;
-        const sku = 'product_sku' in item ? item.product_sku : item.sku;
-        return name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-               sku?.toLowerCase().includes(searchTerm.toLowerCase());
-      });
-    }
+    return matchesSearch && matchesCategory;
+  });
 
-    // Apply category filter
-    if (selectedCategory) {
-      data = data.filter((item) => {
-        const categoryId = 'category' in item ? item.category : item.product_category;
-        return categoryId === selectedCategory;
-      });
-    }
-
-    // Apply stock filter
-    if (filter === 'low_stock') {
-      data = data.filter((item) => {
-        const quantity = 'available_quantity' in item ? item.available_quantity : item.stock_quantity;
-        return quantity <= 5;
-      });
-    }
-
-    return data;
-  };
-
-  const filteredData = getFilteredData();
-  const lowStockCount = (stockData?.stocks || []).filter(stock => stock.available_quantity <= 5).length;
-  const totalProducts = isOwner ? products.length : stockData?.summary.total_products || 0;
+  const lowStockCount = filteredItems.filter(item => item.isLowStock).length;
+  const totalProducts = filteredItems.length;
+  
+  // Calculate total stock value as sum of (stock_quantity × base_price) for all products
+  const totalStockValue = filteredItems.reduce((total, item) => {
+    const quantity = isOwner ? item.stock_quantity : (item.available_quantity || 0);
+    return total + (quantity * item.base_price);
+  }, 0);
 
   if (isLoading) {
     return (
@@ -262,7 +327,11 @@ export const ProductsPage: React.FC = () => {
           
           {isOwner && (
             <button
-              onClick={() => setIsProductModalOpen(true)}
+              onClick={() => {
+                setSelectedProduct(null);
+                reset();
+                setIsProductModalOpen(true);
+              }}
               className="btn-primary flex items-center space-x-2"
             >
               <Plus className="h-4 w-4" />
@@ -272,11 +341,8 @@ export const ProductsPage: React.FC = () => {
         </div>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          <div 
-            className="card p-6 cursor-pointer hover:shadow-lg transition-shadow duration-200"
-            onClick={() => setFilter('all')}
-          >
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="card p-6">
             <div className="flex items-center">
               <div className="flex-shrink-0 p-3 rounded-lg bg-blue-500">
                 <Package className="h-6 w-6 text-white" />
@@ -290,15 +356,9 @@ export const ProductsPage: React.FC = () => {
                 </p>
               </div>
             </div>
-            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Click for breakdown
-            </div>
           </div>
 
-          <div 
-            className="card p-6 cursor-pointer hover:shadow-lg transition-shadow duration-200"
-            onClick={() => setFilter('low_stock')}
-          >
+          <div className="card p-6">
             <div className="flex items-center">
               <div className="flex-shrink-0 p-3 rounded-lg bg-red-500">
                 <AlertTriangle className="h-6 w-6 text-white" />
@@ -312,9 +372,11 @@ export const ProductsPage: React.FC = () => {
                 </p>
               </div>
             </div>
-            <div className="mt-2 text-xs text-red-600 dark:text-red-400">
-              Needs attention
-            </div>
+            {lowStockCount > 0 && (
+              <div className="mt-2 text-xs text-red-600 dark:text-red-400">
+                Needs attention
+              </div>
+            )}
           </div>
 
           <div className="card p-6">
@@ -327,42 +389,18 @@ export const ProductsPage: React.FC = () => {
                   Stock Value
                 </p>
                 <p className="text-2xl font-semibold text-gray-900 dark:text-white">
-                  {formatCurrency(
-                    isOwner ? stockSummary?.total_value || 0 : stockData?.summary.total_stock_value || 0, 
-                    { useLocaleString: true }
-                  )}
+                  {formatCurrency(totalStockValue, { useLocaleString: true })}
                 </p>
               </div>
             </div>
-          </div>
-
-          {isOwner && (
-            <div 
-              className="card p-6 cursor-pointer hover:shadow-lg transition-shadow duration-200"
-              onClick={() => setFilter('products')}
-            >
-              <div className="flex items-center">
-                <div className="flex-shrink-0 p-3 rounded-lg bg-purple-500">
-                  <Tag className="h-6 w-6 text-white" />
-                </div>
-                <div className="ml-4">
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                    Product Catalog
-                  </p>
-                  <p className="text-2xl font-semibold text-gray-900 dark:text-white">
-                    {products.length}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                All products
-              </div>
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Total worth of all products
             </div>
-          )}
+          </div>
         </div>
 
         {/* Low Stock Alert */}
-        {lowStockCount > 0 && filter !== 'low_stock' && (
+        {lowStockCount > 0 && (
           <div className="card p-4 border-l-4 border-red-500 bg-red-50 dark:bg-red-900/20">
             <div className="flex items-center">
               <AlertTriangle className="h-5 w-5 text-red-600 mr-3" />
@@ -370,12 +408,9 @@ export const ProductsPage: React.FC = () => {
                 <p className="text-sm font-medium text-red-800 dark:text-red-200">
                   {lowStockCount} product{lowStockCount > 1 ? 's' : ''} running low on stock
                 </p>
-                <button
-                  onClick={() => setFilter('low_stock')}
-                  className="text-sm text-red-600 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200 underline"
-                >
-                  View low stock items →
-                </button>
+                <p className="text-sm text-red-600 dark:text-red-300">
+                  Low stock items are shown at the top of the table
+                </p>
               </div>
             </div>
           </div>
@@ -383,7 +418,7 @@ export const ProductsPage: React.FC = () => {
 
         {/* Search and Filters */}
         <div className="card p-6">
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0 sm:space-x-4">
             <div className="flex flex-col sm:flex-row sm:items-center space-y-4 sm:space-y-0 sm:space-x-4">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
@@ -410,47 +445,13 @@ export const ProductsPage: React.FC = () => {
               </select>
             </div>
 
-            <div className="flex items-center space-x-2">
-              {/* Filter Buttons */}
-              <div className="flex space-x-1">
-                <button
-                  onClick={() => setFilter('all')}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
-                    filter === 'all'
-                      ? 'bg-primary-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
-                  }`}
-                >
-                  All Stock
-                </button>
-                <button
-                  onClick={() => setFilter('low_stock')}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
-                    filter === 'low_stock'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
-                  }`}
-                >
-                  Low Stock
-                </button>
-                {isOwner && (
-                  <button
-                    onClick={() => setFilter('products')}
-                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-200 ${
-                      filter === 'products'
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
-                    }`}
-                  >
-                    Products
-                  </button>
-                )}
-              </div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Showing {filteredItems.length} product{filteredItems.length !== 1 ? 's' : ''}
             </div>
           </div>
         </div>
 
-        {/* Products Table/Cards */}
+        {/* Unified Products/Stock Table */}
         <div className="card">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
@@ -462,7 +463,7 @@ export const ProductsPage: React.FC = () => {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     SKU
                   </th>
-                  {filter !== 'products' && (
+                  {isSalesman && (
                     <>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                         Allocated
@@ -470,13 +471,15 @@ export const ProductsPage: React.FC = () => {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                         Available
                       </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Sold
-                      </th>
                     </>
                   )}
+                  {isOwner && (
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Stock Quantity
+                    </th>
+                  )}
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Price (MRP)
+                    Retail Price
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Status
@@ -487,141 +490,154 @@ export const ProductsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-                {filteredData.length > 0 ? (
-                  filteredData.map((item: any) => {
-                    const isStock = 'product_name' in item;
-                    const name = isStock ? item.product_name : item.name;
-                    const sku = isStock ? item.product_sku : item.sku;
-                    const price = isStock ? item.base_price : item.base_price;
-                    const isLowStock = isStock ? item.available_quantity <= 5 : item.stock_quantity <= 5;
-                    const soldQuantity = isStock ? item.allocated_quantity - item.available_quantity : 0;
-
-                    return (
-                      <tr key={item.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex items-center">
-                            {item.image_url && (
-                              <img 
-                                src={item.image_url} 
-                                alt={name}
-                                className="h-10 w-10 rounded-lg object-cover mr-3"
-                                onError={(e) => {
-                                  (e.target as HTMLImageElement).style.display = 'none';
-                                }}
-                              />
-                            )}
-                            <div>
-                              <div className="text-sm font-medium text-gray-900 dark:text-white">
-                                {name}
-                              </div>
-                              {item.category_name && (
-                                <div className="text-xs text-gray-500 dark:text-gray-400">
-                                  {item.category_name}
-                                </div>
+                {filteredItems.length > 0 ? (
+                  filteredItems.map((item) => (
+                    <tr 
+                      key={`${isOwner ? 'product' : 'stock'}-${item.id}`} 
+                      className={`hover:bg-gray-50 dark:hover:bg-gray-800 ${
+                        item.isLowStock ? 'bg-red-50 dark:bg-red-900/10' : ''
+                      }`}
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          {item.image_url && (
+                            <img 
+                              src={item.image_url} 
+                              alt={item.name}
+                              className="h-10 w-10 rounded-lg object-cover mr-3"
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).style.display = 'none';
+                              }}
+                            />
+                          )}
+                          <div>
+                            <div className="text-sm font-medium text-gray-900 dark:text-white">
+                              {item.name}
+                              {item.isLowStock && (
+                                <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
+                                  Low Stock
+                                </span>
                               )}
                             </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-sm text-gray-900 dark:text-white">
-                            {sku}
-                          </div>
-                        </td>
-                        {filter !== 'products' && (
-                          <>
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              <div className="text-sm text-gray-900 dark:text-white">
-                                {item.allocated_quantity || 0}
+                            {item.category_name && (
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                {item.category_name}
                               </div>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              <div className={`text-sm font-medium ${
-                                isLowStock ? 'text-red-600' : 'text-gray-900 dark:text-white'
-                              }`}>
-                                {item.available_quantity || item.stock_quantity || 0}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              <div className="text-sm text-gray-900 dark:text-white">
-                                {soldQuantity}
-                              </div>
-                            </td>
-                          </>
-                        )}
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-sm font-medium text-gray-900 dark:text-white">
-                            {formatCurrency(price || 0)}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span
-                            className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                              isLowStock
-                                ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                                : (item.available_quantity || item.stock_quantity || 0) > 20
-                                ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                                : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-                            }`}
-                          >
-                            {isLowStock ? 'Low Stock' : (item.available_quantity || item.stock_quantity || 0) > 20 ? 'In Stock' : 'Medium'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                          <div className="flex items-center space-x-2">
-                            <button
-                              onClick={() => handleCalculateProfit(isStock ? { 
-                                ...item, 
-                                name: item.product_name, 
-                                sku: item.product_sku 
-                              } : item)}
-                              className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-                              title="Calculate Profit"
-                            >
-                              <Calculator className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => handleViewProduct(isStock ? { 
-                                ...item, 
-                                name: item.product_name, 
-                                sku: item.product_sku 
-                              } : item)}
-                              className="text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
-                              title="View Details"
-                            >
-                              <Eye className="h-4 w-4" />
-                            </button>
-                            {isOwner && filter === 'products' && (
-                              <>
-                                <button
-                                  onClick={() => handleEditProduct(item)}
-                                  className="text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
-                                  title="Edit Product"
-                                >
-                                  <Edit className="h-4 w-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteProduct(item.id, item.name)}
-                                  className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                                  title="Delete Product"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              </>
                             )}
                           </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900 dark:text-white">
+                          {item.sku}
+                        </div>
+                      </td>
+                      {isSalesman && (
+                        <>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm text-gray-900 dark:text-white">
+                              {item.allocated_quantity || 0}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className={`text-sm font-medium ${
+                              item.isLowStock ? 'text-red-600' : 'text-gray-900 dark:text-white'
+                            }`}>
+                              {item.available_quantity || 0}
+                            </div>
+                          </td>
+                        </>
+                      )}
+                      {isOwner && (
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className={`text-sm font-medium ${
+                            item.isLowStock ? 'text-red-600' : 'text-gray-900 dark:text-white'
+                          }`}>
+                            {item.stock_quantity}
+                          </div>
                         </td>
-                      </tr>
-                    );
-                  })
+                      )}
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-gray-900 dark:text-white">
+                          {formatCurrency(item.base_price)}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span
+                          className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
+                            item.isLowStock
+                              ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
+                              : item.stock_quantity > 20
+                              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                              : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                          }`}
+                        >
+                          {item.isLowStock ? 'Low Stock' : item.stock_quantity > 20 ? 'In Stock' : 'Medium'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={() => handleViewProduct(item)}
+                            className="text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+                            title="View Details"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          {isOwner && (
+                            <>
+                              <button
+                                onClick={() => handleOpenRestock(item)}
+                                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                                title="Restock Product"
+                              >
+                                <RefreshCw className="h-4 w-4" />
+                              </button>
+                              {item.product && (
+                                <>
+                                  <button
+                                    onClick={() => handleEditProduct(item.product!)}
+                                    className="text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
+                                    title="Edit Product"
+                                  >
+                                    <Edit className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteProduct(item.product!.id, item.product!.name)}
+                                    className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                                    title="Delete Product"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
                 ) : (
                   <tr>
-                    <td colSpan={8} className="px-6 py-8 text-center">
+                    <td colSpan={isOwner ? 6 : 7} className="px-6 py-8 text-center">
                       <div className="flex flex-col items-center">
                         <Package className="h-12 w-12 text-gray-400 mb-4" />
                         <p className="text-gray-500 dark:text-gray-400">
-                          {filter === 'low_stock' ? 'No low stock items found' : 
-                           filter === 'products' ? 'No products found' : 'No stock items found'}
+                          No products found
                         </p>
+                        {isOwner && (
+                          <button
+                            onClick={() => {
+                              setSelectedProduct(null);
+                              reset();
+                              setIsProductModalOpen(true);
+                            }}
+                            className="mt-4 btn-primary flex items-center space-x-2"
+                          >
+                            <Plus className="h-4 w-4" />
+                            <span>Add Your First Product</span>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -631,7 +647,7 @@ export const ProductsPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Product Creation Modal */}
+        {/* Product Creation/Edit Modal */}
         {isProductModalOpen && isOwner && (
           <div className="fixed inset-0 z-50 overflow-y-auto">
             <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
@@ -718,10 +734,10 @@ export const ProductsPage: React.FC = () => {
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="label">MRP (Base Price) *</label>
+                          <label className="label">Retail Price *</label>
                           <input
                             {...register('base_price', { 
-                              required: 'Base price is required',
+                              required: 'Retail price is required',
                               valueAsNumber: true,
                               min: { value: 0, message: 'Price must be positive' }
                             })}
@@ -734,31 +750,25 @@ export const ProductsPage: React.FC = () => {
                           {errors.base_price && (
                             <p className="mt-1 text-sm text-red-600">{errors.base_price.message}</p>
                           )}
+                          <p className="mt-1 text-xs text-gray-500">
+                            This will be the selling price for customers
+                          </p>
                         </div>
 
                         <div>
-                          <label className="label">Cost Price *</label>
+                          <label className="label">Unit</label>
                           <input
-                            {...register('cost_price', { 
-                              required: 'Cost price is required',
-                              valueAsNumber: true,
-                              min: { value: 0, message: 'Price must be positive' }
-                            })}
-                            type="number"
-                            step="0.01"
-                            min="0"
+                            {...register('unit')}
+                            type="text"
                             className="input"
-                            placeholder="0.00"
+                            placeholder="pcs, kg, liter, etc."
                           />
-                          {errors.cost_price && (
-                            <p className="mt-1 text-sm text-red-600">{errors.cost_price.message}</p>
-                          )}
                         </div>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="label">Stock Quantity</label>
+                          <label className="label">Initial Stock Quantity</label>
                           <input
                             {...register('stock_quantity', { 
                               valueAsNumber: true,
@@ -846,8 +856,8 @@ export const ProductsPage: React.FC = () => {
           </div>
         )}
 
-        {/* Profit Calculation Modal */}
-        {isProfitModalOpen && selectedProduct && profitCalculation && (
+        {/* Restock Modal */}
+        {isRestockModalOpen && restockProduct && isOwner && (
           <div className="fixed inset-0 z-50 overflow-y-auto">
             <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
               <div className="fixed inset-0 transition-opacity" aria-hidden="true">
@@ -858,10 +868,14 @@ export const ProductsPage: React.FC = () => {
                 <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                      Profit Calculation
+                      Restock Product
                     </h3>
                     <button
-                      onClick={() => setIsProfitModalOpen(false)}
+                      onClick={() => {
+                        setIsRestockModalOpen(false);
+                        setRestockProduct(null);
+                        setRestockQuantity(0);
+                      }}
                       className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
                     >
                       <X className="h-5 w-5" />
@@ -871,74 +885,63 @@ export const ProductsPage: React.FC = () => {
                   <div className="space-y-4">
                     <div className="text-center">
                       <h4 className="font-medium text-gray-900 dark:text-white">
-                        {selectedProduct.name}
+                        {restockProduct.name}
                       </h4>
                       <p className="text-sm text-gray-500 dark:text-gray-400">
-                        SKU: {selectedProduct.sku}
+                        SKU: {restockProduct.sku}
+                      </p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        Current Stock: {restockProduct.stock_quantity}
                       </p>
                     </div>
 
-                    <div className="space-y-3">
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600 dark:text-gray-400">MRP (Base Price):</span>
-                        <span className="text-sm font-medium text-gray-900 dark:text-white">
-                          {formatCurrency(profitCalculation.base_price)}
-                        </span>
-                      </div>
-                      
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600 dark:text-gray-400">Cost Price:</span>
-                        <span className="text-sm font-medium text-gray-900 dark:text-white">
-                          {formatCurrency(profitCalculation.cost_price)}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600 dark:text-gray-400">Salesman Margin:</span>
-                        <span className="text-sm font-medium text-blue-600 dark:text-blue-400">
-                          10.0%
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600 dark:text-gray-400">Shop Margin:</span>
-                        <span className="text-sm font-medium text-green-600 dark:text-green-400">
-                          15.0%
-                        </span>
-                      </div>
-
-                      <hr className="border-gray-200 dark:border-gray-600" />
-
-                      <div className="flex justify-between">
-                        <span className="text-sm font-medium text-gray-900 dark:text-white">Selling Price:</span>
-                        <span className="text-sm font-bold text-green-600 dark:text-green-400">
-                          {formatCurrency(profitCalculation.selling_price)}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between">
-                        <span className="text-sm font-medium text-gray-900 dark:text-white">Total Profit:</span>
-                        <span className="text-sm font-bold text-primary-600 dark:text-primary-400">
-                          {formatCurrency(profitCalculation.total_profit)}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between">
-                        <span className="text-sm font-medium text-gray-900 dark:text-white">Profit %:</span>
-                        <span className="text-sm font-bold text-primary-600 dark:text-primary-400">
-                          {profitCalculation.profit_percentage.toFixed(2)}%
-                        </span>
-                      </div>
+                    <div>
+                      <label className="label">Quantity to Add *</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={restockQuantity}
+                        onChange={(e) => setRestockQuantity(Number(e.target.value))}
+                        className="input"
+                        placeholder="Enter quantity to add"
+                        autoFocus
+                      />
                     </div>
+
+                    {restockQuantity > 0 && (
+                      <div className="text-center p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                        <p className="text-sm text-gray-600 dark:text-gray-400">
+                          New Stock Level: {restockProduct.stock_quantity + restockQuantity}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6">
+                <div className="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
                   <button
-                    onClick={() => setIsProfitModalOpen(false)}
-                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:text-sm"
+                    onClick={handleRestock}
+                    disabled={isSubmitting || restockQuantity <= 0}
+                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50"
                   >
-                    Close
+                    {isSubmitting ? (
+                      <LoadingSpinner size="sm" />
+                    ) : (
+                      <>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Restock
+                      </>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsRestockModalOpen(false);
+                      setRestockProduct(null);
+                      setRestockQuantity(0);
+                    }}
+                    className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm dark:bg-gray-600 dark:text-gray-200 dark:border-gray-500 dark:hover:bg-gray-700"
+                  >
+                    Cancel
                   </button>
                 </div>
               </div>

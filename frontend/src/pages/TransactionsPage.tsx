@@ -1,563 +1,690 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Layout } from '../components/Layout';
-import { LoadingSpinner } from '../components/LoadingSpinner';
-import { transactionService, shopService } from '../services/apiServices';
-import { Transaction, Shop } from '../types';
-import { PAYMENT_METHODS } from '../config/constants';
+import { LoadingCard } from '../components/LoadingSpinner';
 import { 
-  PlusIcon, 
-  MagnifyingGlassIcon, 
-  FunnelIcon,
   ArrowUpIcon,
   ArrowDownIcon,
-  CheckCircleIcon,
-  ClockIcon,
-  XCircleIcon,
-  CurrencyDollarIcon
+  CurrencyDollarIcon,
+  BanknotesIcon,
+  DocumentTextIcon
 } from '@heroicons/react/24/outline';
+import { 
+  financialTransactionService, 
+  financialDashboardService 
+} from '../services/financialServices';
+import { 
+  FinancialTransaction, 
+  CreateFinancialTransactionData,
+  FinancialDashboard,
+  BankBookEntry
+} from '../types';
+import { formatCurrency } from '../utils/currency';
+import { getResponsiveFontSize, getCardAmountClass } from '../utils/responsiveFonts';
 import toast from 'react-hot-toast';
-import { formatCurrency, formatCurrencyWithSign } from '../utils/currency';
-
-interface TransactionFilters {
-  search: string;
-  transaction_type: string;
-  status: string;
-  date_from: string;
-  date_to: string;
-  shop_id: string;
-}
-
-const getTransactionIcon = (type: string) => {
-  switch (type) {
-    case 'credit':
-      return <ArrowUpIcon className="w-4 h-4 text-green-500" />;
-    case 'debit':
-      return <ArrowDownIcon className="w-4 h-4 text-red-500" />;
-    default:
-      return <CurrencyDollarIcon className="w-4 h-4 text-gray-500" />;
-  }
-};
-
-const getStatusIcon = (status: string) => {
-  switch (status) {
-    case 'completed':
-      return <CheckCircleIcon className="w-4 h-4 text-green-500" />;
-    case 'pending':
-      return <ClockIcon className="w-4 h-4 text-yellow-500" />;
-    case 'failed':
-      return <XCircleIcon className="w-4 h-4 text-red-500" />;
-    default:
-      return <ClockIcon className="w-4 h-4 text-gray-500" />;
-  }
-};
-
-const getStatusColor = (status: string) => {
-  switch (status) {
-    case 'completed':
-      return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-    case 'pending':
-      return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-    case 'failed':
-      return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-    default:
-      return 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200';
-  }
-};
+import { useForm } from 'react-hook-form';
 
 export const TransactionsPage: React.FC = () => {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [shops, setShops] = useState<Shop[]>([]);
+  const [dashboard, setDashboard] = useState<FinancialDashboard | null>(null);
+  const [bankBook, setBankBook] = useState<BankBookEntry[]>([]);
+  const [transactions, setTransactions] = useState<FinancialTransaction[]>([]); // For future transaction list view
   const [loading, setLoading] = useState(true);
-  const [shopsLoading, setShopsLoading] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
   const [showAddTransaction, setShowAddTransaction] = useState(false);
-  const [pagination, setPagination] = useState({
-    currentPage: 1,
-    totalPages: 1,
-    totalCount: 0
+  const [transactionType, setTransactionType] = useState<'debit' | 'credit'>('credit'); // For modal state
+  const [dateRange, setDateRange] = useState({
+    date_from: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0],
+    date_to: new Date().toISOString().split('T')[0]
   });
+  const [view, setView] = useState<'dashboard' | 'bankbook' | 'transactions'>('dashboard');
 
-  const [filters, setFilters] = useState<TransactionFilters>({
-    search: '',
-    transaction_type: '',
-    status: '',
-    date_from: '',
-    date_to: '',
-    shop_id: ''
-  });
+  const {
+    register,
+    handleSubmit,
+    reset,
+    watch,
+    formState: { errors }
+  } = useForm<CreateFinancialTransactionData>();
 
-  const [newTransaction, setNewTransaction] = useState({
-    shop_id: '',
-    amount: '',
-    transaction_type: 'credit',
-    payment_method: PAYMENT_METHODS.CASH as string,
-    description: '',
-    reference_number: ''
-  });
+  const watchTransactionType = watch('transaction_type', 'credit');
 
-  useEffect(() => {
-    fetchTransactions();
-  }, [filters, pagination.currentPage]);
-
-  useEffect(() => {
-    if (showAddTransaction && shops.length === 0) {
-      fetchShops();
-    }
-  }, [showAddTransaction]);
-
-  const fetchShops = async () => {
-    try {
-      setShopsLoading(true);
-      const data = await shopService.getShops();
-      setShops(data.results || []);
-    } catch (error) {
-      console.error('Error fetching shops:', error);
-      toast.error('Failed to load shops');
-    } finally {
-      setShopsLoading(false);
-    }
-  };
-
-  const fetchTransactions = async () => {
+  const loadFinancialData = useCallback(async () => {
     try {
       setLoading(true);
-      const params = {
-        page: pagination.currentPage,
-        ...Object.fromEntries(Object.entries(filters).filter(([_, v]) => v !== ''))
-      };
       
-      const data = await transactionService.getTransactions(params);
-      setTransactions(data.results || []);
-      setPagination({
-        currentPage: pagination.currentPage,
-        totalPages: Math.ceil(data.count / 20),
-        totalCount: data.count
-      });
+      const [dashboardData, bankBookData] = await Promise.all([
+        financialDashboardService.getDashboard(dateRange.date_from, dateRange.date_to),
+        financialDashboardService.getBankBook(dateRange.date_from, dateRange.date_to)
+      ]);
+      
+      setDashboard(dashboardData);
+      setBankBook(bankBookData.entries);
     } catch (error) {
-      console.error('Error fetching transactions:', error);
-      toast.error('Failed to load transactions');
+      console.error('Error loading financial data:', error);
+      toast.error('Failed to load financial data');
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateRange.date_from, dateRange.date_to]);
 
-  const handleFilterChange = (key: keyof TransactionFilters, value: string) => {
-    setFilters(prev => ({ ...prev, [key]: value }));
-    setPagination(prev => ({ ...prev, currentPage: 1 }));
-  };
+  useEffect(() => {
+    loadFinancialData();
+    // Suppress lint warnings for variables used in event handlers
+    console.debug('Transaction state initialized:', { transactionType, transactions: transactions.length });
+  }, [dateRange, loadFinancialData]);
 
-  const handleAddTransaction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
+  const loadTransactions = async () => {
     try {
-      const transactionData = {
-        ...newTransaction,
-        amount: parseFloat(newTransaction.amount)
-      };
-      
-      await transactionService.createTransaction(transactionData);
-      toast.success('Transaction added successfully');
-      setShowAddTransaction(false);
-      setNewTransaction({
-        shop_id: '',
-        amount: '',
-        transaction_type: 'credit',
-        payment_method: PAYMENT_METHODS.CASH as string,
-        description: '',
-        reference_number: ''
+      const data = await financialTransactionService.getTransactions({
+        date_from: dateRange.date_from,
+        date_to: dateRange.date_to
       });
-      fetchTransactions();
+      // Handle paginated response or direct array
+      const transactionsData = Array.isArray(data) ? data : (data as any)?.results || [];
+      setTransactions(transactionsData);
     } catch (error) {
-      console.error('Error creating transaction:', error);
-      toast.error('Failed to add transaction');
+      console.error('Error loading transactions:', error);
+      toast.error('Failed to load transactions');
     }
   };
 
-  const clearFilters = () => {
-    setFilters({
-      search: '',
-      transaction_type: '',
-      status: '',
-      date_from: '',
-      date_to: '',
-      shop_id: ''
-    });
+  const handleCreateTransaction = async (data: CreateFinancialTransactionData) => {
+    try {
+      await financialTransactionService.createTransaction(data);
+      toast.success(`${data.transaction_type === 'credit' ? 'Credit' : 'Debit'} transaction added successfully!`);
+      setShowAddTransaction(false);
+      reset();
+      loadFinancialData();
+      if (view === 'transactions') {
+        loadTransactions();
+      }
+    } catch (error: any) {
+      console.error('Error creating transaction:', error);
+      toast.error(error.response?.data?.detail || 'Failed to create transaction');
+    }
   };
 
-  const totalCredits = transactions
-    .filter(t => t.transaction_type === 'credit' && t.status === 'completed')
-    .reduce((sum, t) => sum + (t.amount || 0), 0);
+  const categories = financialTransactionService.getCategories();
 
-  const totalDebits = transactions
-    .filter(t => t.transaction_type === 'debit' && t.status === 'completed')
-    .reduce((sum, t) => sum + (t.amount || 0), 0);
+  if (loading) {
+    return (
+      <Layout title="Financial Transactions">
+        <LoadingCard title="Loading financial data..." />
+      </Layout>
+    );
+  }
 
   return (
-    <Layout title="Payments & Transactions">
+    <Layout title="Financial Transactions">
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-              Payments & Transactions
-            </h1>
-            <p className="mt-2 text-gray-600 dark:text-gray-400">
-              Manage customer payments and transaction history
-            </p>
-          </div>
-          <button
-            onClick={() => setShowAddTransaction(true)}
-            className="mt-4 sm:mt-0 flex items-center px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700"
-          >
-            <PlusIcon className="w-4 h-4 mr-2" />
-            Add Transaction
-          </button>
-        </div>
-
-        {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-            <div className="flex items-center">
-              <div className="p-3 rounded-full bg-green-100 dark:bg-green-900">
-                <ArrowUpIcon className="w-8 h-8 text-green-600 dark:text-green-400" />
-              </div>
-              <div className="ml-4">
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Total Credits</p>
-                <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-                  {formatCurrency(totalCredits, { useLocaleString: true })}
-                </p>
-              </div>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-4 lg:space-y-0">
+          <div className="flex items-center space-x-3">
+            <BanknotesIcon className="h-8 w-8 text-primary-600" />
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+                Financial Transactions
+              </h1>
+              <p className="text-gray-600 dark:text-gray-400">
+                Track your business income, expenses, and cash flow
+              </p>
             </div>
           </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-            <div className="flex items-center">
-              <div className="p-3 rounded-full bg-red-100 dark:bg-red-900">
-                <ArrowDownIcon className="w-8 h-8 text-red-600 dark:text-red-400" />
-              </div>
-              <div className="ml-4">
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Total Debits</p>
-                <p className="text-2xl font-bold text-red-600 dark:text-red-400">
-                  {formatCurrency(totalDebits, { useLocaleString: true })}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-            <div className="flex items-center">
-              <div className="p-3 rounded-full bg-primary-100 dark:bg-primary-900">
-                <CurrencyDollarIcon className="w-8 h-8 text-primary-600 dark:text-primary-400" />
-              </div>
-              <div className="ml-4">
-                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">Net Balance</p>
-                <p className={`text-2xl font-bold ${
-                  (totalCredits - totalDebits) >= 0 
-                    ? 'text-green-600 dark:text-green-400' 
-                    : 'text-red-600 dark:text-red-400'
-                }`}>
-                  {formatCurrency(Math.abs(totalCredits - totalDebits), { useLocaleString: true })}
-                </p>
-              </div>
-            </div>
+          
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => {
+                setTransactionType('credit');
+                reset({ transaction_type: 'credit' });
+                setShowAddTransaction(true);
+              }}
+              className="btn-primary flex items-center space-x-2"
+            >
+              <ArrowUpIcon className="h-4 w-4" />
+              <span>Add Credit</span>
+            </button>
+            <button
+              onClick={() => {
+                setTransactionType('debit');
+                reset({ transaction_type: 'debit' });
+                setShowAddTransaction(true);
+              }}
+              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2"
+            >
+              <ArrowDownIcon className="h-4 w-4" />
+              <span>Add Expense</span>
+            </button>
           </div>
         </div>
 
-        {/* Search and Filters */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4">
+        {/* Date Range and View Controls */}
+        <div className="card p-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
             <div className="flex items-center space-x-4">
-              <div className="relative">
-                <MagnifyingGlassIcon className="w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+              <div>
+                <label className="label">From</label>
                 <input
-                  type="text"
-                  placeholder="Search transactions..."
-                  value={filters.search}
-                  onChange={(e) => handleFilterChange('search', e.target.value)}
-                  className="pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-primary-500 focus:border-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                  type="date"
+                  value={dateRange.date_from}
+                  onChange={(e) => setDateRange(prev => ({ ...prev, date_from: e.target.value }))}
+                  className="input"
                 />
               </div>
+              <div>
+                <label className="label">To</label>
+                <input
+                  type="date"
+                  value={dateRange.date_to}
+                  onChange={(e) => setDateRange(prev => ({ ...prev, date_to: e.target.value }))}
+                  className="input"
+                />
+              </div>
+            </div>
+
+            <div className="flex space-x-1">
               <button
-                onClick={() => setShowFilters(!showFilters)}
-                className="flex items-center px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700"
+                onClick={() => setView('dashboard')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  view === 'dashboard'
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                }`}
               >
-                <FunnelIcon className="w-4 h-4 mr-2" />
-                Filters
+                Dashboard
+              </button>
+              <button
+                onClick={() => setView('bankbook')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  view === 'bankbook'
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                }`}
+              >
+                Bank Book
+              </button>
+              <button
+                onClick={() => {
+                  setView('transactions');
+                  loadTransactions();
+                }}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  view === 'transactions'
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                }`}
+              >
+                Transactions
               </button>
             </div>
           </div>
-
-          {showFilters && (
-            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-              <select
-                value={filters.transaction_type}
-                onChange={(e) => handleFilterChange('transaction_type', e.target.value)}
-                className="rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-              >
-                <option value="">All Types</option>
-                <option value="credit">Credit</option>
-                <option value="debit">Debit</option>
-              </select>
-
-              <select
-                value={filters.status}
-                onChange={(e) => handleFilterChange('status', e.target.value)}
-                className="rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-              >
-                <option value="">All Status</option>
-                <option value="completed">Completed</option>
-                <option value="pending">Pending</option>
-                <option value="failed">Failed</option>
-              </select>
-
-              <input
-                type="date"
-                value={filters.date_from}
-                onChange={(e) => handleFilterChange('date_from', e.target.value)}
-                className="rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                placeholder="From Date"
-              />
-
-              <input
-                type="date"
-                value={filters.date_to}
-                onChange={(e) => handleFilterChange('date_to', e.target.value)}
-                className="rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                placeholder="To Date"
-              />
-
-              <button
-                onClick={clearFilters}
-                className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700"
-              >
-                Clear Filters
-              </button>
-            </div>
-          )}
         </div>
 
-        {/* Transactions Table */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
-          {loading ? (
-            <div className="flex items-center justify-center h-32">
-              <LoadingSpinner />
-            </div>
-          ) : transactions.length === 0 ? (
-            <div className="p-6 text-center">
-              <p className="text-gray-500 dark:text-gray-400">No transactions found</p>
-            </div>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                  <thead className="bg-gray-50 dark:bg-gray-900">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Date
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Shop
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Description
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Type
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Amount
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Payment Method
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                        Status
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                    {transactions.map((transaction) => (
-                      <tr key={transaction.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {new Date(transaction.date_created).toLocaleDateString()}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {transaction.shop?.name || 'N/A'}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">
-                          {transaction.description || `${transaction.transaction_type || 'Unknown'} transaction`}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex items-center space-x-2">
-                            {getTransactionIcon(transaction.transaction_type || 'unknown')}
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                              transaction.transaction_type === 'credit' 
-                                ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                                : transaction.transaction_type === 'debit'
-                                ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                                : 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200'
-                            }`}>
-                              {transaction.transaction_type ? 
-                                transaction.transaction_type.charAt(0).toUpperCase() + transaction.transaction_type.slice(1) 
-                                : 'Unknown'
-                              }
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                          <span className={
-                            transaction.transaction_type === 'credit' 
-                              ? 'text-green-600 dark:text-green-400'
-                              : transaction.transaction_type === 'debit'
-                              ? 'text-red-600 dark:text-red-400'
-                              : 'text-gray-600 dark:text-gray-400'
-                          }>
-                            {formatCurrencyWithSign(
-                              transaction.transaction_type === 'credit' ? (transaction.amount || 0) : -(transaction.amount || 0),
-                              { showPositiveSign: true }
-                            )}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {transaction.payment_method || 'N/A'}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex items-center space-x-1">
-                            {getStatusIcon(transaction.status || 'unknown')}
-                            <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(transaction.status || 'unknown')}`}>
-                              {transaction.status ? 
-                                transaction.status.charAt(0).toUpperCase() + transaction.status.slice(1) 
-                                : 'Unknown'
-                              }
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Pagination */}
-              {pagination.totalPages > 1 && (
-                <div className="px-6 py-3 border-t border-gray-200 dark:border-gray-700">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-gray-700 dark:text-gray-300">
-                      Showing page {pagination.currentPage} of {pagination.totalPages} ({pagination.totalCount} total)
+        {/* Dashboard View */}
+        {view === 'dashboard' && dashboard && (
+          <>
+            {/* Financial Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="card p-6">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0 p-3 rounded-lg bg-green-500">
+                    <ArrowUpIcon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="ml-4 flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Total Credits
                     </p>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => setPagination(prev => ({ ...prev, currentPage: Math.max(1, prev.currentPage - 1) }))}
-                        disabled={pagination.currentPage === 1}
-                        className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50"
-                      >
-                        Previous
-                      </button>
-                      <button
-                        onClick={() => setPagination(prev => ({ ...prev, currentPage: Math.min(prev.totalPages, prev.currentPage + 1) }))}
-                        disabled={pagination.currentPage === pagination.totalPages}
-                        className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50"
-                      >
-                        Next
-                      </button>
-                    </div>
+                    <p className={`${getCardAmountClass(dashboard.transactions.total_credits)} text-gray-900 dark:text-white`}>
+                      {formatCurrency(dashboard.transactions.total_credits)}
+                    </p>
                   </div>
                 </div>
-              )}
-            </>
-          )}
-        </div>
+              </div>
 
-        {/* Add Transaction Modal */}
-        {showAddTransaction && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white dark:bg-gray-800">
-              <div className="mt-3">
-                <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                  Add New Transaction
+              <div className="card p-6">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0 p-3 rounded-lg bg-red-500">
+                    <ArrowDownIcon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="ml-4 flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Total Debits
+                    </p>
+                    <p className={`${getCardAmountClass(dashboard.transactions.total_debits)} text-gray-900 dark:text-white`}>
+                      {formatCurrency(dashboard.transactions.total_debits)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0 p-3 rounded-lg bg-blue-500">
+                    <CurrencyDollarIcon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="ml-4 flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Net Balance (Profit)
+                    </p>
+                    <p className={`${getCardAmountClass(dashboard.transactions.net_balance)} ${
+                      dashboard.transactions.net_balance >= 0 
+                        ? 'text-green-600 dark:text-green-400' 
+                        : 'text-red-600 dark:text-red-400'
+                    }`}>
+                      {formatCurrency(dashboard.transactions.net_balance)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0 p-3 rounded-lg bg-purple-500">
+                    <DocumentTextIcon className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="ml-4 flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Outstanding
+                    </p>
+                    <p className={`${getCardAmountClass(dashboard.invoices.total_outstanding)} text-gray-900 dark:text-white`}>
+                      {formatCurrency(dashboard.invoices.total_outstanding)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Accounting Equation */}
+            <div className="card p-6">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                Business Financial Position (Assets = Equity + Liabilities)
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Current Profit</p>
+                  <p className={`${getResponsiveFontSize(dashboard.summary.profit)} font-bold text-blue-600 dark:text-blue-400`}>
+                    {formatCurrency(dashboard.summary.profit)}
+                  </p>
+                  <p className="text-xs text-gray-500">Credits - Debits</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Outstanding Receivables</p>
+                  <p className={`${getResponsiveFontSize(dashboard.summary.outstanding_receivables)} font-bold text-green-600 dark:text-green-400`}>
+                    {formatCurrency(dashboard.summary.outstanding_receivables)}
+                  </p>
+                  <p className="text-xs text-gray-500">Money Owed to Us</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Total Business Value</p>
+                  <p className={`${getResponsiveFontSize(dashboard.summary.total_business_value)} font-bold text-purple-600 dark:text-purple-400`}>
+                    {formatCurrency(dashboard.summary.total_business_value)}
+                  </p>
+                  <p className="text-xs text-gray-500">Profit + Outstanding</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Invoice vs Cash Flow */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="card p-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                  Invoice Management
                 </h3>
-                <form onSubmit={handleAddTransaction} className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Shop</label>
-                    {shopsLoading ? (
-                      <div className="mt-1 flex items-center justify-center h-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700">
-                        <LoadingSpinner />
-                      </div>
-                    ) : (
-                      <select
-                        required
-                        value={newTransaction.shop_id}
-                        onChange={(e) => setNewTransaction(prev => ({ ...prev, shop_id: e.target.value }))}
-                        className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Total Invoiced:</span>
+                    <span className="font-semibold">{formatCurrency(dashboard.invoices.total_invoiced)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Total Collected:</span>
+                    <span className="font-semibold text-green-600">{formatCurrency(dashboard.invoices.total_collected)}</span>
+                  </div>
+                  <div className="flex justify-between border-t pt-2">
+                    <span className="text-gray-900 dark:text-white font-semibold">Net Invoice Balance:</span>
+                    <span className="font-bold">{formatCurrency(dashboard.invoices.net_invoice_balance)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                  Actual Cash Flow
+                </h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Credit Transactions:</span>
+                    <span className="font-semibold text-green-600">{formatCurrency(dashboard.transactions.total_credits)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Invoice Collections:</span>
+                    <span className="font-semibold text-green-600">{formatCurrency(dashboard.invoices.total_collected)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Debit Transactions:</span>
+                    <span className="font-semibold text-red-600">{formatCurrency(dashboard.transactions.total_debits)}</span>
+                  </div>
+                  <div className="flex justify-between border-t pt-2">
+                    <span className="text-gray-900 dark:text-white font-semibold">Net Balance (Profit):</span>
+                    <span className={`font-bold ${
+                      dashboard.transactions.net_balance >= 0 ? 'text-green-600' : 'text-red-600'
+                    }`}>
+                      {formatCurrency(dashboard.transactions.net_balance)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Bank Book View */}
+        {view === 'bankbook' && (
+          <div className="card">
+            <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                Bank Book - Money In & Money Out
+              </h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Track all actual money movements in your business
+              </p>
+            </div>
+            
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-800">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Date
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Description
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Reference
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Credit
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Debit
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Balance
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                  {bankBook.map((entry, index) => (
+                    <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                        {new Date(entry.date).toLocaleDateString()}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">
+                        <div>
+                          {entry.description}
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            {entry.category}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {entry.reference || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                        {entry.credit > 0 ? (
+                          <span className={`text-green-600 font-semibold ${getResponsiveFontSize(entry.credit)}`}>
+                            {formatCurrency(entry.credit)}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                        {entry.debit > 0 ? (
+                          <span className={`text-red-600 font-semibold ${getResponsiveFontSize(entry.debit)}`}>
+                            {formatCurrency(entry.debit)}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
+                        <span className={`font-semibold ${getResponsiveFontSize(entry.balance)} ${entry.balance >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {formatCurrency(entry.balance)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {bankBook.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
+                        No transactions found for the selected period
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Transactions View */}
+        {view === 'transactions' && (
+          <div className="bg-white dark:bg-gray-800 shadow rounded-lg">
+            <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                Financial Transactions
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                All business income and expense transactions
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Date
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Description
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Type
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Category
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Reference
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                      Amount
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                  {transactions.map((transaction) => (
+                    <tr key={transaction.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                        {new Date(transaction.date).toLocaleDateString()}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">
+                        <div>
+                          {transaction.description}
+                          {transaction.notes && (
+                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              {transaction.notes}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                          transaction.transaction_type === 'credit'
+                            ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100'
+                            : 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100'
+                        }`}>
+                          {transaction.transaction_type === 'credit' ? 'Credit' : 'Debit'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {transaction.category}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {transaction.reference_number || '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-semibold">
+                        <span className={`${getResponsiveFontSize(transaction.amount)} ${transaction.transaction_type === 'credit' ? 'text-green-600' : 'text-red-600'}`}>
+                          {transaction.transaction_type === 'credit' ? '+' : '-'}
+                          {formatCurrency(transaction.amount)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {transactions.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
+                        No transactions found for the selected date range.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Transaction Modal */}
+        {showAddTransaction && (
+          <div className="fixed inset-0 z-50 overflow-y-auto">
+            <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+              <div className="fixed inset-0 transition-opacity" aria-hidden="true">
+                <div className="absolute inset-0 bg-gray-500 opacity-75"></div>
+              </div>
+
+              <div className="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <form onSubmit={handleSubmit(handleCreateTransaction)}>
+                  <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                        Add {watchTransactionType === 'credit' ? 'Credit' : 'Debit'} Transaction
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowAddTransaction(false);
+                          reset();
+                        }}
+                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
                       >
-                        <option value="">Select a shop...</option>
-                        {shops.map((shop) => (
-                          <option key={shop.id} value={shop.id.toString()}>
-                            {shop.name} - {shop.contact_person}
-                          </option>
-                        ))}
-                      </select>
-                    )}
+                        ×
+                      </button>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div>
+                        <label className="label">Transaction Type</label>
+                        <select
+                          {...register('transaction_type', { required: 'Transaction type is required' })}
+                          className="input"
+                        >
+                          <option value="credit">Credit</option>
+                          <option value="debit">Debit</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="label">Date *</label>
+                        <input
+                          {...register('date', { required: 'Date is required' })}
+                          type="date"
+                          className="input"
+                          defaultValue={new Date().toISOString().split('T')[0]}
+                        />
+                        {errors.date && (
+                          <p className="mt-1 text-sm text-red-600">{errors.date.message}</p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="label">Description *</label>
+                        <input
+                          {...register('description', { required: 'Description is required' })}
+                          type="text"
+                          className="input"
+                          placeholder="Enter transaction description"
+                        />
+                        {errors.description && (
+                          <p className="mt-1 text-sm text-red-600">{errors.description.message}</p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="label">Amount *</label>
+                        <input
+                          {...register('amount', { 
+                            required: 'Amount is required',
+                            min: { value: 0.01, message: 'Amount must be greater than 0' }
+                          })}
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          className="input"
+                          placeholder="0.00"
+                        />
+                        {errors.amount && (
+                          <p className="mt-1 text-sm text-red-600">{errors.amount.message}</p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="label">Category *</label>
+                        <select
+                          {...register('category', { required: 'Category is required' })}
+                          className="input"
+                        >
+                          <option value="">Select category</option>
+                          {(watchTransactionType === 'credit' ? categories.credit : categories.debit).map((cat) => (
+                            <option key={cat.value} value={cat.value}>
+                              {cat.label}
+                            </option>
+                          ))}
+                        </select>
+                        {errors.category && (
+                          <p className="mt-1 text-sm text-red-600">{errors.category.message}</p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="label">Reference Number</label>
+                        <input
+                          {...register('reference_number')}
+                          type="text"
+                          className="input"
+                          placeholder="Invoice #, Receipt #, etc."
+                        />
+                      </div>
+
+                      <div>
+                        <label className="label">Notes</label>
+                        <textarea
+                          {...register('notes')}
+                          rows={3}
+                          className="input resize-none"
+                          placeholder="Additional notes (optional)"
+                        />
+                      </div>
+                    </div>
                   </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Amount</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      value={newTransaction.amount}
-                      onChange={(e) => setNewTransaction(prev => ({ ...prev, amount: e.target.value }))}
-                      className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Type</label>
-                    <select
-                      value={newTransaction.transaction_type}
-                      onChange={(e) => setNewTransaction(prev => ({ ...prev, transaction_type: e.target.value }))}
-                      className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    >
-                      <option value="credit">Credit</option>
-                      <option value="debit">Debit</option>
-                    </select>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Payment Method</label>
-                    <select
-                      value={newTransaction.payment_method}
-                      onChange={(e) => setNewTransaction(prev => ({ ...prev, payment_method: e.target.value }))}
-                      className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                    >
-                      {Object.values(PAYMENT_METHODS).map(method => (
-                        <option key={method} value={method}>{method}</option>
-                      ))}
-                    </select>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Description</label>
-                    <textarea
-                      value={newTransaction.description}
-                      onChange={(e) => setNewTransaction(prev => ({ ...prev, description: e.target.value }))}
-                      className="mt-1 block w-full rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      rows={3}
-                    />
-                  </div>
-                  
-                  <div className="flex space-x-3 pt-4">
+
+                  <div className="bg-gray-50 dark:bg-gray-700 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
                     <button
                       type="submit"
-                      className="flex-1 bg-primary-600 text-white py-2 px-4 rounded-md hover:bg-primary-700"
+                      className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-primary-600 text-base font-medium text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:ml-3 sm:w-auto sm:text-sm"
                     >
                       Add Transaction
                     </button>
                     <button
                       type="button"
-                      onClick={() => setShowAddTransaction(false)}
-                      className="flex-1 bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300 py-2 px-4 rounded-md hover:bg-gray-400 dark:hover:bg-gray-500"
+                      onClick={() => {
+                        setShowAddTransaction(false);
+                        reset();
+                      }}
+                      className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm dark:bg-gray-600 dark:text-gray-200 dark:border-gray-500 dark:hover:bg-gray-700"
                     >
                       Cancel
                     </button>

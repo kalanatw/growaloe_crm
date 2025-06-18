@@ -29,12 +29,12 @@ const navigation = [
   { name: 'Invoice History', href: '/invoices', icon: FileText },
   { name: 'Shops', href: '/shops', icon: Users },
   { name: 'Invoice Settlement', href: '/invoice-settlement', icon: Receipt },
-  { name: 'Transactions', href: '/transactions', icon: CreditCard },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
 ];
 
 // Owner-only navigation items
 const ownerNavigation = [
+  { name: 'Transactions', href: '/transactions', icon: CreditCard },
   { name: 'Manage Salesmen', href: '/salesmen', icon: UserPlus },
   { name: 'Product Deliveries', href: '/deliveries', icon: Truck },
 ];

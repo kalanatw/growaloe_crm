@@ -219,9 +219,9 @@ export interface CreateProductData {
   sku: string;
   category?: number;
   image_url?: string;
-  cost_price: number;
+  cost_price?: number; // Made optional since we're simplifying to retail price only
   base_price: number;
-  unit: string;
+  unit?: string;
   stock_quantity?: number;
   min_stock_level?: number;
   is_active?: boolean;
@@ -365,4 +365,113 @@ export interface CreateDeliveryData {
     quantity: number;
     notes?: string;
   }[];
+}
+
+// Financial Transaction Types
+export interface FinancialTransaction {
+  id: number;
+  transaction_type: 'debit' | 'credit';
+  date: string;
+  description: string;
+  amount: number;
+  category: string;
+  reference_number?: string;
+  invoice_id?: string;
+  notes?: string;
+  created_by: number;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateFinancialTransactionData {
+  transaction_type: 'debit' | 'credit';
+  date: string;
+  description: string;
+  amount: number;
+  category: string;
+  reference_number?: string;
+  invoice_id?: string;
+  notes?: string;
+}
+
+export interface FinancialSummary {
+  id: number;
+  start_date: string;
+  end_date: string;
+  total_debits: number;
+  total_credits: number;
+  net_balance: number;
+  total_invoices: number;
+  total_settlements: number;
+  outstanding_balance: number;
+  actual_income: number;
+  cash_flow: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FinancialDashboard {
+  period: {
+    date_from: string;
+    date_to: string;
+  };
+  transactions: {
+    total_debits: number;
+    total_credits: number;
+    net_balance: number;
+  };
+  invoices: {
+    total_invoiced: number;
+    total_collected: number;
+    net_invoice_balance: number;
+    total_outstanding: number;
+  };
+  cash_flow: {
+    total_credits: number;
+    total_debits: number;
+    net_cash_flow: number;
+  };
+  summary: {
+    profit: number;
+    outstanding_receivables: number;
+    total_business_value: number;
+  };
+}
+
+export interface BankBookEntry {
+  date: string;
+  type: 'transaction' | 'settlement';
+  description: string;
+  reference?: string;
+  credit: number;  // Money received
+  debit: number;   // Money spent/owed
+  balance: number;
+  category: string;
+  notes?: string;
+}
+
+export interface BankBook {
+  date_from: string;
+  date_to: string;
+  entries: BankBookEntry[];
+  final_balance: number;
+}
+
+export interface InvoiceSettlement {
+  id: number;
+  invoice: number;
+  invoice_number: string;
+  shop_name: string;
+  settlement_date: string;
+  amount: number;
+  payment_method: string;
+  reference_number?: string;
+  bank_name?: string;
+  cheque_date?: string;
+  notes?: string;
+  created_by: number;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
 }
