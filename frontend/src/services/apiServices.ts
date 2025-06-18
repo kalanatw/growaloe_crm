@@ -115,6 +115,17 @@ export const productService = {
     return apiClient.get('/products/salesman-stock/all_available_stock/');
   },
 
+  // New method for owners to get products for invoice creation
+  getProductsForInvoice: async (): Promise<{
+    stocks: SalesmanStock[];
+    summary: {
+      total_products: number;
+      total_available_quantity: number;
+    };
+  }> => {
+    return apiClient.get('/products/products/for_invoice_creation/');
+  },
+
   getCategories: async (): Promise<{ results: Category[] }> => {
     return apiClient.get<{ results: Category[] }>('/products/categories/');
   },

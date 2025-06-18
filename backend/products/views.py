@@ -381,6 +381,85 @@ class ProductViewSet(viewsets.ModelViewSet):
         serializer = SalesmanStockSerializer(stocks, many=True)
         return Response(serializer.data)
 
+    @extend_schema(
+        summary="Get all products for invoice creation (owners only)",
+        description="Get all active products with stock information for owners to create invoices directly",
+        responses={
+            200: OpenApiResponse(
+                description="Products available for invoice creation",
+                examples=[
+                    OpenApiExample(
+                        "Products for Invoice Response",
+                        value={
+                            "stocks": [
+                                {
+                                    "id": "product_1",
+                                    "product": 1,
+                                    "product_name": "Aloe Vera Gel",
+                                    "product_sku": "ALV001",
+                                    "product_base_price": 25.00,
+                                    "available_quantity": 100,
+                                    "category": "Skincare"
+                                }
+                            ],
+                            "summary": {
+                                "total_products": 1,
+                                "total_available_quantity": 100,
+                                "total_stock_value": 2500.00
+                            }
+                        }
+                    )
+                ]
+            ),
+            403: OpenApiResponse(description="Permission denied")
+        },
+        tags=['Product Management']
+    )
+    @action(detail=False, methods=['get'])
+    def for_invoice_creation(self, request):
+        """
+        Get all products available for invoice creation (owners only)
+        Owners can create invoices directly from product stock without delivery restrictions
+        """
+        if request.user.role not in ['owner', 'developer']:
+            return Response(
+                {'error': 'Permission denied. Only owners can access direct product stock.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Get all active products with stock
+        products = Product.objects.filter(is_active=True, stock_quantity__gt=0).select_related('category')
+        
+        stock_data = []
+        for product in products:
+            stock_data.append({
+                'id': f"product_{product.id}",
+                'product': product.id,
+                'product_name': product.name,
+                'product_sku': product.sku,
+                'product_base_price': float(product.base_price),
+                'available_quantity': product.stock_quantity,
+                'category': product.category.name if product.category else 'Uncategorized',
+                # Add fields to match SalesmanStock interface
+                'salesman': None,
+                'salesman_name': 'Direct Stock',
+                'allocated_quantity': product.stock_quantity,
+                'created_at': product.created_at.isoformat(),
+                'updated_at': product.updated_at.isoformat(),
+            })
+        
+        return Response({
+            'stocks': stock_data,
+            'summary': {
+                'total_products': len(stock_data),
+                'total_available_quantity': sum(item['available_quantity'] for item in stock_data),
+                'total_stock_value': sum(
+                    item['product_base_price'] * item['available_quantity'] 
+                    for item in stock_data
+                )
+            }
+        })
+
 
 @extend_schema_view(
     list=extend_schema(
@@ -719,7 +798,10 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                         'name': data['product'].name,
                         'cost_price': str(data['product'].cost_price),
                         'selling_price': str(data['product'].base_price),
-                        'category': data['product'].category
+                        'category': {
+                            'id': data['product'].category.id,
+                            'name': data['product'].category.name
+                        } if data['product'].category else None
                     },
                     'allocated_quantity': data['remaining_quantity'],
                     'delivered_quantity': data['delivered_quantity'],

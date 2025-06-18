@@ -377,11 +377,11 @@ class ShopViewSet(viewsets.ModelViewSet):
         
         # Filter based on user role
         if user.role == 'owner':
-            try:
-                owner = user.owner_profile
-                queryset = queryset.filter(salesman__owner=owner)
-            except Owner.DoesNotExist:
-                queryset = queryset.none()
+            # Owners can access all shops regardless of who created them
+            queryset = queryset.all()
+        elif user.role == 'developer':
+            # Developers can access all shops
+            queryset = queryset.all()
         elif user.role == 'salesman':
             try:
                 salesman = user.salesman_profile

@@ -132,7 +132,7 @@ export const NewCreateInvoicePage: React.FC = () => {
       
       // Choose the appropriate stock endpoint based on user role
       const stockPromise = userRole === 'owner' || userRole === 'developer' 
-        ? productService.getAllAvailableStock()
+        ? productService.getProductsForInvoice()
         : productService.getMySalesmanStock();
       
       const [shopsData, stockDataResponse, companySettings] = await Promise.all([

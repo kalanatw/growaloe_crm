@@ -70,6 +70,13 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
                     f"Insufficient stock. Available: {available_qty}, Requested: {quantity}"
                 )
         
+        # For owners/developers, check against main product stock
+        elif request and request.user.role in ['owner', 'developer']:
+            if quantity > product.stock_quantity:
+                raise serializers.ValidationError(
+                    f"Insufficient product stock. Available: {product.stock_quantity}, Requested: {quantity}"
+                )
+        
         return data
 
 
@@ -165,10 +172,22 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
         
         invoice = Invoice.objects.create(**validated_data)
         
-        # Create invoice items and create stock movement records
+        # Create invoice items and handle stock appropriately
         for item_data in items_data:
             # Create invoice item
             invoice_item = InvoiceItem.objects.create(invoice=invoice, **item_data)
+            
+            # Handle stock reduction based on user role
+            if request and request.user.role in ['owner', 'developer']:
+                # For owners, reduce main product stock
+                product = invoice_item.product
+                if product.stock_quantity >= invoice_item.quantity:
+                    product.stock_quantity -= invoice_item.quantity
+                    product.save(update_fields=['stock_quantity'])
+                else:
+                    raise serializers.ValidationError(
+                        f"Insufficient stock for {product.name}. Available: {product.stock_quantity}"
+                    )
             
             # Create stock movement record for the sale
             if invoice.salesman:
