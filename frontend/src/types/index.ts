@@ -343,11 +343,15 @@ export interface DeliveryItem {
 
 export interface Delivery {
   id?: number;
+  delivery_number?: string;
   salesman: number;
   salesman_name?: string;
   delivery_date: string;
   status: string;
+  settlement_date?: string;
+  total_margin_earned?: number;
   notes?: string;
+  settlement_notes?: string;
   items: DeliveryItem[];
   total_items?: number;
   created_by?: number;
@@ -474,4 +478,56 @@ export interface InvoiceSettlement {
   created_by_name: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface SalesmanStockAllocation {
+  salesman_name: string;
+  allocated: number;
+  available: number;
+  sold: number;
+}
+
+export interface ProductStockDetails {
+  owner_stock: number;
+  total_allocated: number;
+  total_available: number;
+  low_stock_alert: boolean;
+  salesman_allocations: SalesmanStockAllocation[];
+}
+
+export interface StockSummaryItem {
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  total_stock: number;
+  allocated_stock: number;
+  available_stock: number;
+  salesmen_count: number;
+}
+
+export interface DeliverySettlementItem {
+  delivery_item_id: number;
+  product_id: number;
+  product_name: string;
+  delivered_quantity: number;
+  sold_quantity: number;
+  remaining_quantity: number;
+  margin_earned: number;
+}
+
+export interface DeliverySettlementData {
+  delivery_id: number;
+  delivery_number: string;
+  salesman_name: string;
+  delivery_date: string;
+  items: DeliverySettlementItem[];
+}
+
+export interface SettleDeliveryRequest {
+  settlement_notes?: string;
+  items: Array<{
+    delivery_item_id: number;
+    remaining_quantity: number;
+    margin_earned: number;
+  }>;
 }

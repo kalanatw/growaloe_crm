@@ -10,13 +10,16 @@ import {
   Clock, 
   Eye,
   Edit,
-  Truck
+  Truck,
+  Calculator,
+  DollarSign
 } from 'lucide-react';
 import { deliveryService, salesmanService } from '../services/apiServices';
 import { Delivery, Salesman } from '../types';
 import toast from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
 import { CreateDeliveryModal } from '../components/CreateDeliveryModal';
+import { SettlementModal } from '../components/SettlementModal';
 
 export const DeliveriesPage: React.FC = () => {
   const { user } = useAuth();
@@ -25,10 +28,21 @@ export const DeliveriesPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
+  const [settlementDeliveryId, setSettlementDeliveryId] = useState<number | null>(null);
 
   useEffect(() => {
     loadData();
-  }, []);
+    
+    // Set up real-time updates every 30 seconds, but pause when modals are open
+    const interval = setInterval(() => {
+      // Don't auto-refresh if any modal is open to avoid interrupting user interactions
+      if (!isCreateModalOpen && !selectedDelivery && !settlementDeliveryId) {
+        loadData();
+      }
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [isCreateModalOpen, selectedDelivery, settlementDeliveryId]);
 
   const loadData = async () => {
     try {
@@ -71,6 +85,11 @@ export const DeliveriesPage: React.FC = () => {
     }
   };
 
+  const handleSettlementCompleted = () => {
+    setSettlementDeliveryId(null);
+    loadData(); // Reload deliveries to reflect settlement
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'pending':
@@ -85,6 +104,19 @@ export const DeliveriesPage: React.FC = () => {
           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
             <CheckCircle className="w-3 h-3 mr-1" />
             Delivered
+          </span>
+        );
+      case 'settled':
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+            <CheckCircle className="w-3 h-3 mr-1" />
+            Settled
+          </span>
+        );
+      case 'cancelled':
+        return (
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+            Cancelled
           </span>
         );
       default:
@@ -143,62 +175,15 @@ export const DeliveriesPage: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {deliveries.map((delivery) => (
-              <div key={delivery.id} className="card p-6 hover:shadow-lg transition-shadow">
-                <div className="flex justify-between items-start mb-4">
-                  <div className="flex items-center space-x-3">
-                    <div className="p-2 bg-blue-100 rounded-lg">
-                      <Package className="w-5 h-5 text-blue-600" />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-gray-900">
-                        Delivery #{delivery.id}
-                      </h3>
-                      <p className="text-sm text-gray-600">
-                        To: {delivery.salesman_name}
-                      </p>
-                    </div>
-                  </div>
-                  {getStatusBadge(delivery.status)}
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center text-sm text-gray-600">
-                    <Calendar className="w-4 h-4 mr-2" />
-                    <span>{new Date(delivery.delivery_date).toLocaleDateString()}</span>
-                  </div>
-                  
-                  <div className="flex items-center text-sm text-gray-600">
-                    <Package className="w-4 h-4 mr-2" />
-                    <span>{delivery.total_items || delivery.items?.length || 0} items</span>
-                  </div>
-
-                  {delivery.notes && (
-                    <p className="text-sm text-gray-600 bg-gray-50 p-2 rounded">
-                      {delivery.notes}
-                    </p>
-                  )}
-                </div>
-
-                <div className="mt-6 flex space-x-2">
-                  <button
-                    onClick={() => setSelectedDelivery(delivery)}
-                    className="flex-1 btn btn-outline btn-sm flex items-center justify-center space-x-1"
-                  >
-                    <Eye className="w-4 h-4" />
-                    <span>View</span>
-                  </button>
-                  
-                  {delivery.status === 'pending' && user?.role === 'owner' && (
-                    <button
-                      onClick={() => handleMarkAsDelivered(delivery.id!)}
-                      className="flex-1 btn btn-primary btn-sm flex items-center justify-center space-x-1"
-                    >
-                      <CheckCircle className="w-4 h-4" />
-                      <span>Mark Delivered</span>
-                    </button>
-                  )}
-                </div>
-              </div>
+              <DeliveryCard
+                key={delivery.id}
+                delivery={delivery}
+                user={user}
+                onViewDetails={setSelectedDelivery}
+                onMarkAsDelivered={handleMarkAsDelivered}
+                onStartSettlement={setSettlementDeliveryId}
+                getStatusBadge={getStatusBadge}
+              />
             ))}
           </div>
         )}
@@ -213,6 +198,16 @@ export const DeliveriesPage: React.FC = () => {
           />
         )}
 
+        {/* Settlement Modal */}
+        {settlementDeliveryId && (
+          <SettlementModal
+            deliveryId={settlementDeliveryId}
+            isOpen={!!settlementDeliveryId}
+            onClose={() => setSettlementDeliveryId(null)}
+            onSettled={handleSettlementCompleted}
+          />
+        )}
+
         {/* Delivery Details Modal */}
         {selectedDelivery && (
           <DeliveryDetailsModal
@@ -223,6 +218,174 @@ export const DeliveriesPage: React.FC = () => {
         )}
       </div>
     </Layout>
+  );
+};
+
+// Delivery Card Component
+const DeliveryCard: React.FC<{
+  delivery: Delivery;
+  user: any;
+  onViewDetails: (delivery: Delivery) => void;
+  onMarkAsDelivered: (id: number) => void;
+  onStartSettlement: (id: number) => void;
+  getStatusBadge: (status: string) => JSX.Element;
+}> = ({ delivery, user, onViewDetails, onMarkAsDelivered, onStartSettlement, getStatusBadge }) => {
+  const [remainingStock, setRemainingStock] = useState<{ [key: number]: number }>({});
+  const [isLoadingStock, setIsLoadingStock] = useState(false);
+
+  useEffect(() => {
+    if (delivery.status === 'delivered') {
+      loadRemainingStock();
+    }
+  }, [delivery.id, delivery.status]);
+
+  const loadRemainingStock = async () => {
+    try {
+      setIsLoadingStock(true);
+      const settlementData = await deliveryService.getSettlementData(delivery.id!);
+      const stockMap: { [key: number]: number } = {};
+      settlementData.items.forEach(item => {
+        stockMap[item.product_id] = item.remaining_quantity;
+      });
+      setRemainingStock(stockMap);
+    } catch (error) {
+      console.error('Error loading remaining stock:', error);
+      // Don't show toast error for this as it's a background operation
+    } finally {
+      setIsLoadingStock(false);
+    }
+  };
+
+  const getTotalRemainingStock = () => {
+    return Object.values(remainingStock).reduce((total, stock) => total + stock, 0);
+  };
+
+  const hasRemainingStock = () => {
+    return getTotalRemainingStock() > 0;
+  };
+
+  return (
+    <div className="card p-6 hover:shadow-lg transition-shadow">
+      <div className="flex justify-between items-start mb-4">
+        <div className="flex items-center space-x-3">
+          <div className="p-2 bg-blue-100 rounded-lg">
+            <Package className="w-5 h-5 text-blue-600" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-gray-900">
+              Delivery #{delivery.id}
+            </h3>
+            <p className="text-sm text-gray-600">
+              To: {delivery.salesman_name}
+            </p>
+          </div>
+        </div>
+        {getStatusBadge(delivery.status)}
+      </div>
+
+      <div className="space-y-3">
+        <div className="flex items-center text-sm text-gray-600">
+          <Calendar className="w-4 h-4 mr-2" />
+          <span>{new Date(delivery.delivery_date).toLocaleDateString()}</span>
+        </div>
+        
+        <div className="flex items-center text-sm text-gray-600">
+          <Package className="w-4 h-4 mr-2" />
+          <span>{delivery.total_items || delivery.items?.length || 0} items</span>
+        </div>
+
+        {/* Show remaining stock for delivered deliveries */}
+        {delivery.status === 'delivered' && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3">
+            <div className="flex items-center space-x-2 mb-2">
+              <Package className="w-4 h-4 text-yellow-600" />
+              <span className="text-sm font-medium text-yellow-800">Remaining Stock</span>
+              {isLoadingStock && (
+                <div className="w-3 h-3 border-2 border-yellow-600 border-t-transparent rounded-full animate-spin" />
+              )}
+            </div>
+            {isLoadingStock ? (
+              <p className="text-xs text-yellow-600">Loading stock data...</p>
+            ) : hasRemainingStock() ? (
+              <div>
+                <p className="text-sm font-semibold text-yellow-900">
+                  {getTotalRemainingStock()} units pending return
+                </p>
+                <div className="mt-1 space-y-1">
+                  {Object.entries(remainingStock).map(([productId, stock]) => {
+                    if (stock > 0) {
+                      const item = delivery.items?.find(i => i.product?.toString() === productId);
+                      return (
+                        <p key={productId} className="text-xs text-yellow-700">
+                          {item?.product_name || `Product ${productId}`}: {stock} units
+                        </p>
+                      );
+                    }
+                    return null;
+                  })}
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-yellow-600">All stock sold or settled</p>
+            )}
+          </div>
+        )}
+
+        {/* Show settlement info for settled deliveries */}
+        {delivery.status === 'settled' && delivery.total_margin_earned && (
+          <div className="bg-green-50 border border-green-200 rounded-md p-3">
+            <div className="flex items-center space-x-2 mb-1">
+              <DollarSign className="w-4 h-4 text-green-600" />
+              <span className="text-sm font-medium text-green-800">Settled</span>
+            </div>
+            <p className="text-sm font-semibold text-green-900">
+              Margin: LKR {delivery.total_margin_earned.toFixed(2)}
+            </p>
+            {delivery.settlement_date && (
+              <p className="text-xs text-green-600">
+                On {new Date(delivery.settlement_date).toLocaleDateString()}
+              </p>
+            )}
+          </div>
+        )}
+
+        {delivery.notes && (
+          <p className="text-sm text-gray-600 bg-gray-50 p-2 rounded">
+            {delivery.notes}
+          </p>
+        )}
+      </div>
+
+      <div className="mt-6 flex space-x-2">
+        <button
+          onClick={() => onViewDetails(delivery)}
+          className="flex-1 btn btn-outline btn-sm flex items-center justify-center space-x-1"
+        >
+          <Eye className="w-4 h-4" />
+          <span>View</span>
+        </button>
+        
+        {delivery.status === 'pending' && user?.role === 'owner' && (
+          <button
+            onClick={() => onMarkAsDelivered(delivery.id!)}
+            className="flex-1 btn btn-primary btn-sm flex items-center justify-center space-x-1"
+          >
+            <CheckCircle className="w-4 h-4" />
+            <span>Mark Delivered</span>
+          </button>
+        )}
+
+        {delivery.status === 'delivered' && user?.role === 'owner' && (
+          <button
+            onClick={() => onStartSettlement(delivery.id!)}
+            className="flex-1 btn btn-success btn-sm flex items-center justify-center space-x-1"
+          >
+            <Calculator className="w-4 h-4" />
+            <span>Settle</span>
+          </button>
+        )}
+      </div>
+    </div>
   );
 };
 

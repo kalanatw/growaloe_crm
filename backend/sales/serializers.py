@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from decimal import Decimal
 from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment
-from products.models import Product, SalesmanStock
+from products.models import Product, CentralStock
 
 User = get_user_model()
 
@@ -70,11 +70,20 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
                     f"Insufficient stock. Available: {available_qty}, Requested: {quantity}"
                 )
         
-        # For owners/developers, check against main product stock
+        # For owners/developers, check against owner stock in CentralStock
         elif request and request.user.role in ['owner', 'developer']:
-            if quantity > product.stock_quantity:
+            try:
+                owner_stock = CentralStock.objects.get(
+                    product=product,
+                    location_type='owner'
+                )
+                if quantity > owner_stock.quantity:
+                    raise serializers.ValidationError(
+                        f"Insufficient owner stock. Available: {owner_stock.quantity}, Requested: {quantity}"
+                    )
+            except CentralStock.DoesNotExist:
                 raise serializers.ValidationError(
-                    f"Insufficient product stock. Available: {product.stock_quantity}, Requested: {quantity}"
+                    f"No owner stock available for product {product.name}"
                 )
         
         return data
@@ -179,14 +188,23 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
             
             # Handle stock reduction based on user role
             if request and request.user.role in ['owner', 'developer']:
-                # For owners, reduce main product stock
+                # For owners, reduce owner stock in CentralStock
                 product = invoice_item.product
-                if product.stock_quantity >= invoice_item.quantity:
-                    product.stock_quantity -= invoice_item.quantity
-                    product.save(update_fields=['stock_quantity'])
-                else:
+                try:
+                    owner_stock = CentralStock.objects.get(
+                        product=product,
+                        location_type='owner'
+                    )
+                    if owner_stock.quantity >= invoice_item.quantity:
+                        owner_stock.quantity -= invoice_item.quantity
+                        owner_stock.save()
+                    else:
+                        raise serializers.ValidationError(
+                            f"Insufficient owner stock for {product.name}. Available: {owner_stock.quantity}"
+                        )
+                except CentralStock.DoesNotExist:
                     raise serializers.ValidationError(
-                        f"Insufficient stock for {product.name}. Available: {product.stock_quantity}"
+                        f"No owner stock available for product {product.name}"
                     )
             
             # Create stock movement record for the sale

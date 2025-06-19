@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from accounts.models import Owner, Salesman, Shop, MarginPolicy
-from products.models import Category, Product, SalesmanStock
+from products.models import Category, Product, CentralStock
 from sales.models import Invoice, InvoiceItem, Transaction
 from decimal import Decimal
 from datetime import date, timedelta
@@ -191,35 +191,32 @@ class Command(BaseCommand):
                     'cost_price': Decimal(cost),
                     'base_price': Decimal(price),
                     'unit': 'piece',
-                    'stock_quantity': 500,
                     'min_stock_level': 50
                 }
             )
             products.append(product)
 
-        # Create Salesman Stock
+        # Create CentralStock for salesmen
         for product in products:
             # Stock for salesman1
-            allocated_qty = random.randint(80, 200)
-            available_qty = random.randint(10, allocated_qty)
-            SalesmanStock.objects.get_or_create(
-                salesman=salesman1,
+            quantity = random.randint(80, 200)
+            CentralStock.objects.get_or_create(
+                location_type='salesman',
+                location_id=salesman1.id,
                 product=product,
                 defaults={
-                    'allocated_quantity': allocated_qty,
-                    'available_quantity': available_qty
+                    'quantity': quantity
                 }
             )
             
             # Stock for salesman2
-            allocated_qty = random.randint(60, 150)
-            available_qty = random.randint(5, allocated_qty)
-            SalesmanStock.objects.get_or_create(
-                salesman=salesman2,
+            quantity = random.randint(60, 150)
+            CentralStock.objects.get_or_create(
+                location_type='salesman',
+                location_id=salesman2.id,
                 product=product,
                 defaults={
-                    'allocated_quantity': allocated_qty,
-                    'available_quantity': available_qty
+                    'quantity': quantity
                 }
             )
 

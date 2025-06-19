@@ -34,6 +34,7 @@ const navigation = [
 
 // Owner-only navigation items
 const ownerNavigation = [
+  { name: 'Stock Management', href: '/stock-management', icon: Package },
   { name: 'Transactions', href: '/transactions', icon: CreditCard },
   { name: 'Manage Salesmen', href: '/salesmen', icon: UserPlus },
   { name: 'Product Deliveries', href: '/deliveries', icon: Truck },

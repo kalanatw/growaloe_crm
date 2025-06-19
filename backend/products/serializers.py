@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db.models import Sum
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem, Delivery, DeliveryItem
+from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem, CentralStock
+from accounts.models import Salesman
 
 User = get_user_model()
 
@@ -21,60 +23,98 @@ class CategorySerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
+    stock_quantity = serializers.SerializerMethodField()
+    owner_stock = serializers.SerializerMethodField()
+    total_salesman_stock = serializers.SerializerMethodField()
     
     class Meta:
         model = Product
         fields = [
             'id', 'name', 'description', 'sku', 'category', 'category_name',
             'image_url', 'cost_price', 'base_price', 'unit', 'stock_quantity',
-            'min_stock_level', 'is_active', 'created_at', 'updated_at'
+            'owner_stock', 'total_salesman_stock', 'min_stock_level', 
+            'is_active', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'category_name']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'category_name', 
+                          'stock_quantity', 'owner_stock', 'total_salesman_stock']
 
-    def get_stock_quantity_for_user(self, obj):
+    @extend_schema_field(serializers.IntegerField)
+    def get_stock_quantity(self, obj):
         """Get appropriate stock quantity based on user role"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             if request.user.role == 'salesman':
-                stock = SalesmanStock.objects.filter(
-                    salesman=request.user.salesman_profile,
-                    product=obj
-                ).first()
-                return stock.available_quantity if stock else 0
-        return obj.stock_quantity
+                # For salesmen, show their available stock
+                try:
+                    central_stock = CentralStock.objects.get(
+                        product=obj,
+                        location_type='salesman',
+                        location_id=request.user.salesman_profile.id
+                    )
+                    return central_stock.quantity
+                except CentralStock.DoesNotExist:
+                    return 0
+        
+        # For owners and others, show total owner stock
+        try:
+            owner_stock = CentralStock.objects.get(
+                product=obj, 
+                location_type='owner',
+                location_id__isnull=True
+            )
+            return owner_stock.quantity
+        except CentralStock.DoesNotExist:
+            return 0
 
-    def to_representation(self, instance):
-        """Customize the serialized representation"""
-        representation = super().to_representation(instance)
-        request = self.context.get('request')
-        
-        # For salesmen, show their available quantity instead of total stock
-        if request and request.user.is_authenticated and request.user.role == 'salesman':
-            representation['stock_quantity'] = self.get_stock_quantity_for_user(instance)
-        
-        return representation
+    @extend_schema_field(serializers.IntegerField)
+    def get_owner_stock(self, obj):
+        """Get owner stock quantity"""
+        try:
+            owner_stock = CentralStock.objects.get(
+                product=obj, 
+                location_type='owner',
+                location_id__isnull=True
+            )
+            return owner_stock.quantity
+        except CentralStock.DoesNotExist:
+            return 0
+
+    @extend_schema_field(serializers.IntegerField)
+    def get_total_salesman_stock(self, obj):
+        """Get total stock with all salesmen"""
+        return CentralStock.objects.filter(
+            product=obj, 
+            location_type='salesman'
+        ).aggregate(total=Sum('quantity'))['total'] or 0
 
 
 class SalesmanStockSerializer(serializers.ModelSerializer):
+    """Serializer for salesman stock using CentralStock"""
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
     product_base_price = serializers.DecimalField(source='product.base_price', max_digits=10, decimal_places=2, read_only=True)
-    salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
+    salesman_name = serializers.SerializerMethodField()
+    allocated_quantity = serializers.IntegerField(source='quantity', read_only=True)
+    available_quantity = serializers.IntegerField(source='quantity', read_only=True)
     
     class Meta:
-        model = SalesmanStock
+        model = CentralStock
         fields = [
-            'id', 'salesman', 'salesman_name', 'product', 'product_name', 'product_sku',
-            'product_base_price', 'allocated_quantity', 'available_quantity', 'created_at', 'updated_at'
+            'id', 'product', 'product_name', 'product_sku',
+            'product_base_price', 'salesman_name', 'allocated_quantity', 'available_quantity',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'product_base_price', 'salesman_name']
     
-    def validate(self, data):
-        if data.get('allocated_quantity', 0) < data.get('available_quantity', 0):
-            raise serializers.ValidationError(
-                "Available quantity cannot be greater than allocated quantity"
-            )
-        return data
+    def get_salesman_name(self, obj):
+        """Get salesman name from location_id"""
+        if obj.location_type == 'salesman' and obj.location_id:
+            try:
+                salesman = Salesman.objects.get(id=obj.location_id)
+                return salesman.user.get_full_name()
+            except Salesman.DoesNotExist:
+                return "Unknown Salesman"
+        return "Owner"
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -190,3 +230,46 @@ class CreateDeliverySerializer(serializers.ModelSerializer):
             DeliveryItem.objects.create(delivery=delivery, **item_data)
         
         return delivery
+
+class CentralStockSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    salesman_name = serializers.CharField(source='salesman.name', read_only=True)
+    
+    class Meta:
+        model = CentralStock
+        fields = [
+            'id', 'product', 'product_name', 'product_sku', 
+            'location', 'salesman', 'salesman_name', 'quantity',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'salesman_name']
+
+class DeliverySettlementItemSerializer(serializers.Serializer):
+    """Serializer for individual items in delivery settlement"""
+    delivery_item_id = serializers.IntegerField()
+    product_id = serializers.IntegerField(read_only=True)
+    product_name = serializers.CharField(read_only=True)
+    delivered_quantity = serializers.IntegerField(read_only=True)
+    sold_quantity = serializers.IntegerField(read_only=True)
+    remaining_quantity = serializers.IntegerField()
+    margin_earned = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+
+class DeliverySettlementSerializer(serializers.Serializer):
+    """Serializer for delivery settlement data"""
+    delivery_id = serializers.IntegerField(read_only=True)
+    delivery_number = serializers.CharField(read_only=True)
+    salesman_name = serializers.CharField(read_only=True)
+    delivery_date = serializers.DateField(read_only=True)
+    settlement_notes = serializers.CharField(required=False, allow_blank=True)
+    items = DeliverySettlementItemSerializer(many=True)
+
+
+class SettleDeliverySerializer(serializers.Serializer):
+    """Serializer for settling a delivery"""
+    settlement_notes = serializers.CharField(required=False, allow_blank=True)
+    items = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="List of items with delivery_item_id, remaining_quantity, and margin_earned"
+    )

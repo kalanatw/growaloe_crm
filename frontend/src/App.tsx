@@ -16,6 +16,7 @@ import { AnalyticsPage } from './pages/AnalyticsPage';
 import { InvoiceDetailPage } from './pages/InvoiceDetailPage';
 import { ShopDetailPage } from './pages/ShopDetailPage';
 import { TransactionsPage } from './pages/TransactionsPage';
+import { StockManagementPage } from './pages/StockManagementPage';
 import { SalesmenPage } from './pages/SalesmenPage';
 import { CreateSalesmanPage } from './pages/CreateSalesmanPage';
 import { InvoiceSettlementPage } from './pages/InvoiceSettlementPage';
@@ -117,6 +118,14 @@ function App() {
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER]}>
                       <TransactionsPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/stock-management"
+                  element={
+                    <ProtectedRoute allowedRoles={[USER_ROLES.OWNER]}>
+                      <StockManagementPage />
                     </ProtectedRoute>
                   }
                 />

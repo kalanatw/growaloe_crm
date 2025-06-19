@@ -9,12 +9,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 
-from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, CentralStock
 from .serializers import (
     CategorySerializer, ProductSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
     SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
-    DeliveryItemSerializer
+    DeliveryItemSerializer, DeliverySettlementSerializer, SettleDeliverySerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 
@@ -258,38 +258,14 @@ class ProductViewSet(viewsets.ModelViewSet):
         """
         product = serializer.save(created_by=self.request.user)
         
-        # Create stock movement record for initial stock if stock_quantity > 0
-        if product.stock_quantity > 0:
-            StockMovement.objects.create(
-                product=product,
-                movement_type='purchase',
-                quantity=product.stock_quantity,
-                notes=f'Initial stock for product creation',
-                created_by=self.request.user
-            )
+        # No need to create stock movement for initial stock since stock is managed centrally
+        # Initial stock will be added via CentralStock when needed
 
     def perform_update(self, serializer):
         """
-        Handle product updates with stock tracking
+        Handle product updates - stock is managed via CentralStock, not product fields
         """
-        old_product = self.get_object()
-        old_stock_quantity = old_product.stock_quantity
-        
         product = serializer.save()
-        new_stock_quantity = product.stock_quantity
-        
-        # Create stock movement if stock quantity changed
-        if new_stock_quantity != old_stock_quantity:
-            quantity_diff = new_stock_quantity - old_stock_quantity
-            movement_type = 'purchase' if quantity_diff > 0 else 'adjustment'
-            
-            StockMovement.objects.create(
-                product=product,
-                movement_type=movement_type,
-                quantity=quantity_diff,
-                notes=f'Stock quantity updated from {old_stock_quantity} to {new_stock_quantity}',
-                created_by=self.request.user
-            )
 
     @extend_schema(
         summary="Get stock summary for all products",
@@ -321,24 +297,43 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def stock_summary(self, request):
         """
-        Get stock summary for all products
+        Get stock summary for all products using CentralStock
         """
-        products = Product.objects.filter(is_active=True).annotate(
-            allocated_stock=Sum('salesman_allocations__allocated_quantity'),
-            available_stock=Sum('salesman_allocations__available_quantity'),
-            salesmen_count=Count('salesman_allocations__salesman', distinct=True)
-        )
+        products = Product.objects.filter(is_active=True)
 
         summary_data = []
         for product in products:
+            # Get total stock from CentralStock
+            total_stock = CentralStock.objects.filter(product=product).aggregate(
+                total=Sum('quantity')
+            )['total'] or 0
+            
+            # Get allocated stock (salesman stock)
+            allocated_stock = CentralStock.objects.filter(
+                product=product, 
+                location_type='salesman'
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            
+            # Get owner stock (available for allocation)
+            owner_stock = CentralStock.objects.filter(
+                product=product, 
+                location_type='owner'
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            
+            # Count unique salesmen with this product
+            salesmen_count = CentralStock.objects.filter(
+                product=product, 
+                location_type='salesman'
+            ).values('location_id').distinct().count()
+
             summary_data.append({
                 'product_id': product.id,
                 'product_name': product.name,
                 'product_sku': product.sku,
-                'total_stock': product.allocated_stock or 0,
-                'allocated_stock': product.allocated_stock or 0,
-                'available_stock': product.available_stock or 0,
-                'salesmen_count': product.salesmen_count or 0
+                'total_stock': total_stock,
+                'allocated_stock': allocated_stock,
+                'available_stock': owner_stock,
+                'salesmen_count': salesmen_count
             })
 
         serializer = ProductStockSummarySerializer(summary_data, many=True)
@@ -377,9 +372,34 @@ class ProductViewSet(viewsets.ModelViewSet):
         Get stock distribution for a specific product across salesmen
         """
         product = self.get_object()
-        stocks = SalesmanStock.objects.filter(product=product).select_related('salesman__user')
-        serializer = SalesmanStockSerializer(stocks, many=True)
-        return Response(serializer.data)
+        # Get salesman stocks from central stock
+        stocks = CentralStock.objects.filter(
+            product=product, 
+            location_type='salesman'
+        ).select_related('product')
+        
+        # Create response with salesman info
+        stock_data = []
+        for stock in stocks:
+            try:
+                from accounts.models import Salesman
+                salesman = Salesman.objects.get(id=stock.location_id)
+                stock_data.append({
+                    'id': stock.id,
+                    'product': stock.product.id,
+                    'product_name': stock.product.name,
+                    'product_sku': stock.product.sku,
+                    'product_base_price': float(stock.product.base_price),
+                    'salesman_name': salesman.user.get_full_name(),
+                    'allocated_quantity': stock.quantity,
+                    'available_quantity': stock.quantity,
+                    'created_at': stock.created_at.isoformat(),
+                    'updated_at': stock.updated_at.isoformat(),
+                })
+            except Salesman.DoesNotExist:
+                continue
+        
+        return Response(stock_data)
 
     @extend_schema(
         summary="Get all products for invoice creation (owners only)",
@@ -427,26 +447,31 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get all active products with stock
-        products = Product.objects.filter(is_active=True, stock_quantity__gt=0).select_related('category')
+        # Get all active products with owner stock from CentralStock
+        owner_stocks = CentralStock.objects.filter(
+            location_type='owner', 
+            quantity__gt=0
+        ).select_related('product__category')
         
         stock_data = []
-        for product in products:
-            stock_data.append({
-                'id': f"product_{product.id}",
-                'product': product.id,
-                'product_name': product.name,
-                'product_sku': product.sku,
-                'product_base_price': float(product.base_price),
-                'available_quantity': product.stock_quantity,
-                'category': product.category.name if product.category else 'Uncategorized',
-                # Add fields to match SalesmanStock interface
-                'salesman': None,
-                'salesman_name': 'Direct Stock',
-                'allocated_quantity': product.stock_quantity,
-                'created_at': product.created_at.isoformat(),
-                'updated_at': product.updated_at.isoformat(),
-            })
+        for stock in owner_stocks:
+            product = stock.product
+            if product.is_active:
+                stock_data.append({
+                    'id': f"product_{product.id}",
+                    'product': product.id,
+                    'product_name': product.name,
+                    'product_sku': product.sku,
+                    'product_base_price': float(product.base_price),
+                    'available_quantity': stock.quantity,
+                    'category': product.category.name if product.category else 'Uncategorized',
+                    # Add fields to match SalesmanStock interface
+                    'salesman': None,
+                    'salesman_name': 'Direct Stock',
+                    'allocated_quantity': stock.quantity,
+                    'created_at': stock.created_at.isoformat(),
+                    'updated_at': stock.updated_at.isoformat(),
+                })
         
         return Response({
             'stocks': stock_data,
@@ -458,6 +483,222 @@ class ProductViewSet(viewsets.ModelViewSet):
                     for item in stock_data
                 )
             }
+        })
+
+    @extend_schema(
+        summary="Add stock to product",
+        description="Add stock quantity to a product (Owner/Developer only)",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'quantity': {'type': 'integer', 'minimum': 1, 'description': 'Quantity to add'},
+                    'notes': {'type': 'string', 'description': 'Optional notes for the stock addition'}
+                },
+                'required': ['quantity']
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Stock added successfully",
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'success': {'type': 'boolean'},
+                        'message': {'type': 'string'},
+                        'old_quantity': {'type': 'integer'},
+                        'new_quantity': {'type': 'integer'},
+                        'added_quantity': {'type': 'integer'}
+                    }
+                }
+            ),
+            400: OpenApiResponse(description="Invalid data"),
+            403: OpenApiResponse(description="Permission denied"),
+            404: OpenApiResponse(description="Product not found")
+        },
+        tags=['Product Management']
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def add_stock(self, request, pk=None):
+        """
+        Add stock to a product
+        """
+        product = self.get_object()
+        quantity = request.data.get('quantity')
+        notes = request.data.get('notes')
+        
+        if not quantity or quantity <= 0:
+            return Response(
+                {'error': 'Quantity must be a positive integer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            result = product.add_stock(
+                quantity=int(quantity),
+                user=request.user,
+                notes=notes
+            )
+            
+            return Response({
+                'success': True,
+                'message': f'Successfully added {quantity} units to {product.name}',
+                **result
+            })
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @extend_schema(
+        summary="Reduce stock from product",
+        description="Reduce stock quantity from a product (Owner/Developer only)",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'quantity': {'type': 'integer', 'minimum': 1, 'description': 'Quantity to reduce'},
+                    'notes': {'type': 'string', 'description': 'Optional notes for the stock reduction'},
+                    'reason': {'type': 'string', 'enum': ['adjustment', 'damage', 'return'], 'description': 'Reason for stock reduction'}
+                },
+                'required': ['quantity']
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Stock reduced successfully",
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'success': {'type': 'boolean'},
+                        'message': {'type': 'string'},
+                        'old_quantity': {'type': 'integer'},
+                        'new_quantity': {'type': 'integer'},
+                        'reduced_quantity': {'type': 'integer'}
+                    }
+                }
+            ),
+            400: OpenApiResponse(description="Invalid data or insufficient stock"),
+            403: OpenApiResponse(description="Permission denied"),
+            404: OpenApiResponse(description="Product not found")
+        },
+        tags=['Product Management']
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def reduce_stock(self, request, pk=None):
+        """
+        Reduce stock from a product
+        """
+        product = self.get_object()
+        quantity = request.data.get('quantity')
+        notes = request.data.get('notes')
+        reason = request.data.get('reason', 'adjustment')
+        
+        if not quantity or quantity <= 0:
+            return Response(
+                {'error': 'Quantity must be a positive integer'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            result = product.reduce_stock(
+                quantity=int(quantity),
+                user=request.user,
+                notes=notes,
+                movement_type=reason
+            )
+            
+            return Response({
+                'success': True,
+                'message': f'Successfully reduced {quantity} units from {product.name}',
+                **result
+            })
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @extend_schema(
+        summary="Get real-time stock status",
+        description="Get current stock levels including owner stock and salesman allocations",
+        responses={
+            200: OpenApiResponse(
+                description="Stock status retrieved successfully",
+                response={
+                    'type': 'object',
+                    'properties': {
+                        'owner_stock': {'type': 'integer'},
+                        'total_allocated': {'type': 'integer'},
+                        'total_available': {'type': 'integer'},
+                        'low_stock_alert': {'type': 'boolean'},
+                        'salesman_allocations': {
+                            'type': 'array',
+                            'items': {
+                                'type': 'object',
+                                'properties': {
+                                    'salesman_name': {'type': 'string'},
+                                    'allocated': {'type': 'integer'},
+                                    'available': {'type': 'integer'},
+                                    'sold': {'type': 'integer'}
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            404: OpenApiResponse(description="Product not found")
+        },
+        tags=['Product Management']
+    )
+    @action(detail=True, methods=['get'])
+    def stock_status(self, request, pk=None):
+        """
+        Get real-time stock status for a product
+        """
+        product = self.get_object()
+        
+        # Get salesman allocations from central stock
+        salesman_stocks = CentralStock.objects.filter(
+            product=product, 
+            location_type='salesman'
+        )
+        
+        total_allocated = sum(stock.quantity for stock in salesman_stocks)
+        total_available = sum(stock.quantity for stock in salesman_stocks)
+        
+        salesman_data = []
+        for stock in salesman_stocks:
+            try:
+                from accounts.models import Salesman
+                salesman = Salesman.objects.get(id=stock.location_id)
+                salesman_data.append({
+                    'salesman_name': salesman.user.get_full_name(),
+                    'allocated': stock.quantity,
+                    'available': stock.quantity,
+                    'sold': 0  # For now, we'll implement sold tracking later
+                })
+            except Salesman.DoesNotExist:
+                continue
+        
+        # Get owner stock from central stock
+        try:
+            owner_stock = CentralStock.objects.get(
+                product=product,
+                location_type='owner',
+                location_id__isnull=True
+            )
+            owner_stock_quantity = owner_stock.quantity
+        except CentralStock.DoesNotExist:
+            owner_stock_quantity = 0
+        
+        return Response({
+            'owner_stock': owner_stock_quantity,
+            'total_allocated': total_allocated,
+            'total_available': total_available,
+            'low_stock_alert': product.is_low_stock,
+            'salesman_allocations': salesman_data
         })
 
 
@@ -552,16 +793,16 @@ class ProductViewSet(viewsets.ModelViewSet):
 )
 class SalesmanStockViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing salesman stock allocations with role-based access control
+    ViewSet for managing salesman stock allocations using CentralStock
     """
-    queryset = SalesmanStock.objects.select_related('product', 'salesman__user').all()
+    queryset = CentralStock.objects.filter(location_type='salesman').select_related('product').all()
     serializer_class = SalesmanStockSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['salesman', 'product']
-    search_fields = ['product__name', 'product__sku', 'salesman__user__first_name', 'salesman__user__last_name']
-    ordering_fields = ['quantity', 'allocated_quantity', 'last_updated']
-    ordering = ['-last_updated']
+    filterset_fields = ['location_id', 'product']
+    search_fields = ['product__name', 'product__sku']
+    ordering_fields = ['quantity', 'created_at', 'updated_at']
+    ordering = ['-updated_at']
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -569,10 +810,11 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
 
         if user.role == 'salesman':
             # Salesmen can only see their own stock
-            return queryset.filter(salesman=user.salesman_profile)
+            return queryset.filter(location_id=user.salesman_profile.id)
         elif user.role == 'shop':
-            # Shops can see stock of salesmen assigned to them
-            return queryset.filter(salesman__assigned_shops=user.shop_profile)
+            # Shops can see stock of salesmen assigned to them - this will need adjustment
+            # For now, return empty queryset since shops don't directly manage stock
+            return queryset.none()
         else:
             # Owners and Developers can see all stock
             return queryset
@@ -622,7 +864,7 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def my_stock(self, request):
         """
-        Get current user's stock from deliveries (for salesmen)
+        Get current user's stock from CentralStock (for salesmen)
         """
         if request.user.role != 'salesman':
             return Response(
@@ -630,66 +872,40 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get salesman's current stock from deliveries
-        from .models import DeliveryItem
-        
-        # Get all delivery items for this salesman
-        delivery_items = DeliveryItem.objects.filter(
-            delivery__salesman=request.user.salesman_profile
-        ).select_related('product', 'delivery')
-        
-        # Group by product and calculate remaining stock
-        stock_data = {}
-        for item in delivery_items:
-            product_id = item.product.id
-            if product_id not in stock_data:
-                stock_data[product_id] = {
-                    'product': item.product,
-                    'delivered_quantity': 0,
-                    'sold_quantity': 0,  # Will be calculated from invoices
-                    'remaining_quantity': 0
-                }
-            stock_data[product_id]['delivered_quantity'] += item.quantity
-        
-        # Calculate sold quantities from invoices
-        from sales.models import InvoiceItem
-        for product_id in stock_data.keys():
-            sold_qty = InvoiceItem.objects.filter(
-                invoice__salesman=request.user.salesman_profile,
-                product_id=product_id
-            ).aggregate(total_sold=Sum('quantity'))['total_sold'] or 0
-            
-            stock_data[product_id]['sold_quantity'] = sold_qty
-            stock_data[product_id]['remaining_quantity'] = (
-                stock_data[product_id]['delivered_quantity'] - sold_qty
-            )
-        
-        # Convert to serializable format matching SalesmanStock interface
+        # Get salesman's stock from CentralStock
+        salesman_stocks = CentralStock.objects.filter(
+            location_type='salesman',
+            location_id=request.user.salesman_profile.id,
+            quantity__gt=0  # Only show products with stock > 0
+        ).select_related('product')
+
+        # Convert to serializable format
         stock_data_list = []
-        for product_id, data in stock_data.items():
-            if data['remaining_quantity'] > 0:  # Only show products with remaining stock
-                stock_data_list.append({
-                    'id': f"delivery_{product_id}",
-                    'salesman': request.user.salesman_profile.id,
-                    'salesman_name': request.user.get_full_name(),
-                    'product': data['product'].id,
-                    'product_name': data['product'].name,
-                    'product_sku': data['product'].sku,
-                    'product_base_price': float(data['product'].base_price),
-                    'allocated_quantity': data['delivered_quantity'],
-                    'available_quantity': data['remaining_quantity'],
-                    'created_at': timezone.now().isoformat(),
-                    'updated_at': timezone.now().isoformat(),
-                })
+        total_stock_value = 0
         
+        for stock in salesman_stocks:
+            stock_value = stock.quantity * stock.product.base_price
+            total_stock_value += stock_value
+            
+            stock_data_list.append({
+                'id': stock.id,
+                'salesman': request.user.salesman_profile.id,
+                'salesman_name': request.user.get_full_name(),
+                'product': stock.product.id,
+                'product_name': stock.product.name,
+                'product_sku': stock.product.sku,
+                'product_base_price': float(stock.product.base_price),
+                'allocated_quantity': stock.quantity,
+                'available_quantity': stock.quantity,  # For salesmen, allocated = available
+                'created_at': stock.created_at.isoformat(),
+                'updated_at': stock.updated_at.isoformat(),
+            })
+
         return Response({
             'stocks': stock_data_list,
             'summary': {
                 'total_products': len(stock_data_list),
-                'total_stock_value': sum(
-                    float(stock['product_base_price']) * stock['available_quantity'] 
-                    for stock in stock_data_list
-                )
+                'total_stock_value': float(total_stock_value),
             }
         })
 
@@ -1088,13 +1304,13 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         
         if old_status != new_status:
             if new_status == 'delivered' and old_status == 'pending':
-                # When marking as delivered, update salesman stock
+                # When marking as delivered, update central stock
                 for item in instance.items.all():
-                    item._update_salesman_stock()
+                    item._update_central_stock()
             elif old_status == 'delivered' and new_status in ['pending', 'cancelled']:
                 # When changing from delivered, reverse stock allocation
                 for item in instance.items.all():
-                    item._update_salesman_stock(reverse=True)
+                    item._update_central_stock(reverse=True)
         
         serializer.save()
     
@@ -1121,9 +1337,8 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         delivery.status = 'delivered'
         delivery.save()
         
-        # Update salesman stock for all items
-        for item in delivery.items.all():
-            item._update_salesman_stock()
+        # Stock is already transferred when DeliveryItem is created
+        # No need to update stock here
         
         serializer = self.get_serializer(delivery)
         return Response(serializer.data)
@@ -1143,6 +1358,135 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(delivery)
         return Response(serializer.data)
+
+    @extend_schema(
+        summary="Get settlement data for delivery",
+        description="Get data needed for settling a delivery - shows sold and remaining quantities",
+        responses={
+            200: OpenApiResponse(
+                description="Settlement data with sold and remaining quantities",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Data",
+                        value={
+                            "delivery_id": 1,
+                            "delivery_number": "DEL-20250619-001",
+                            "salesman_name": "Mike Johnson",
+                            "items": [
+                                {
+                                    "delivery_item_id": 1,
+                                    "product_id": 1,
+                                    "product_name": "Aloe Vera Gel",
+                                    "delivered_quantity": 100,
+                                    "sold_quantity": 75,
+                                    "remaining_quantity": 25,
+                                    "margin_earned": 50.00
+                                }
+                            ]
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Only delivered deliveries can be settled")
+        }
+    )
+    @action(detail=True, methods=['get'])
+    def settlement_data(self, request, pk=None):
+        """Get settlement data for a delivery"""
+        delivery = self.get_object()
+        
+        if delivery.status != 'delivered':
+            return Response(
+                {'error': 'Only delivered deliveries can be settled'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        settlement_data = delivery.get_settlement_data()
+        
+        return Response({
+            'delivery_id': delivery.id,
+            'delivery_number': delivery.delivery_number,
+            'salesman_name': delivery.salesman.user.get_full_name(),
+            'delivery_date': delivery.delivery_date.isoformat(),
+            'items': settlement_data
+        })
+
+    @extend_schema(
+        summary="Settle delivery",
+        description="Settle a delivery by confirming remaining stock and calculating margins",
+        request={
+            "type": "object",
+            "properties": {
+                "settlement_notes": {"type": "string", "description": "Notes for the settlement"},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "delivery_item_id": {"type": "integer"},
+                            "remaining_quantity": {"type": "integer"},
+                            "margin_earned": {"type": "number"}
+                        },
+                        "required": ["delivery_item_id", "remaining_quantity", "margin_earned"]
+                    }
+                }
+            },
+            "required": ["items"]
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Settlement completed successfully",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Result",
+                        value={
+                            "status": "settled",
+                            "settlement_date": "2025-06-19",
+                            "total_margin_earned": 75.50,
+                            "message": "Delivery settled successfully"
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Settlement validation errors")
+        }
+    )
+    @action(detail=True, methods=['post'])
+    def settle(self, request, pk=None):
+        """Settle a delivery"""
+        delivery = self.get_object()
+        
+        if delivery.status != 'delivered':
+            return Response(
+                {'error': 'Only delivered deliveries can be settled'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        settlement_notes = request.data.get('settlement_notes', '')
+        settlement_items = request.data.get('items', [])
+        
+        if not settlement_items:
+            return Response(
+                {'error': 'Settlement items are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            result = delivery.settle_delivery(settlement_items, settlement_notes)
+            return Response({
+                **result,
+                'message': 'Delivery settled successfully'
+            })
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Settlement failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 @extend_schema_view(

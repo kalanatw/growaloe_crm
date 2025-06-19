@@ -293,12 +293,9 @@ export const ProductsPage: React.FC = () => {
 
   const lowStockCount = filteredItems.filter(item => item.isLowStock).length;
   const totalProducts = filteredItems.length;
-  
-  // Calculate total stock value as sum of (stock_quantity × base_price) for all products
-  const totalStockValue = filteredItems.reduce((total, item) => {
-    const quantity = isOwner ? item.stock_quantity : (item.available_quantity || 0);
-    return total + (quantity * item.base_price);
-  }, 0);
+  const totalStockValue = isOwner 
+    ? stockSummary?.total_value || 0 
+    : stockData?.summary.total_stock_value || 0;
 
   if (isLoading) {
     return (
@@ -392,9 +389,6 @@ export const ProductsPage: React.FC = () => {
                   {formatCurrency(totalStockValue, { useLocaleString: true })}
                 </p>
               </div>
-            </div>
-            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Total worth of all products
             </div>
           </div>
         </div>
@@ -596,14 +590,14 @@ export const ProductsPage: React.FC = () => {
                               {item.product && (
                                 <>
                                   <button
-                                    onClick={() => handleEditProduct(item.product!)}
+                                    onClick={() => item.product && handleEditProduct(item.product)}
                                     className="text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
                                     title="Edit Product"
                                   >
                                     <Edit className="h-4 w-4" />
                                   </button>
                                   <button
-                                    onClick={() => handleDeleteProduct(item.product!.id, item.product!.name)}
+                                    onClick={() => item.product && handleDeleteProduct(item.product.id, item.product.name)}
                                     className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
                                     title="Delete Product"
                                   >

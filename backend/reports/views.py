@@ -18,7 +18,7 @@ from .serializers import (
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 from sales.models import Invoice, InvoiceItem, Transaction
-from products.models import Product, SalesmanStock
+from products.models import Product, CentralStock
 
 User = get_user_model()
 
@@ -187,9 +187,9 @@ class DashboardMetricsViewSet(viewsets.ModelViewSet):
         
         total_products = Product.objects.filter(is_active=True).count()
         
-        # Calculate total inventory value
+        # Calculate total inventory value from CentralStock
         total_inventory_value = Decimal('0')
-        stocks = SalesmanStock.objects.select_related('product').all()
+        stocks = CentralStock.objects.select_related('product').all()
         for stock in stocks:
             total_inventory_value += stock.quantity * stock.product.cost_price
         

@@ -149,12 +149,115 @@ class InvoiceItem(models.Model):
         # Set total_price to unit_price * quantity (simple multiplication)
         self.total_price = Decimal(str(self.quantity)) * Decimal(str(self.unit_price))
         
+        is_new = self.pk is None
+        old_quantity = 0
+        
+        if not is_new:
+            # Get old quantity for stock adjustment
+            old_item = InvoiceItem.objects.get(pk=self.pk)
+            old_quantity = old_item.quantity
+        
         super().save(*args, **kwargs)
+        
+        # Update stock quantities when invoice item is saved
+        self._update_stock_quantities(old_quantity, is_new)
         
         # Update invoice totals
         if self.invoice_id:  # Only if invoice exists
             self.invoice.calculate_totals()
             self.invoice.save()
+    
+    def delete(self, *args, **kwargs):
+        # Restore stock when item is deleted
+        self._restore_stock_quantities()
+        super().delete(*args, **kwargs)
+    
+    def _update_stock_quantities(self, old_quantity=0, is_new=True):
+        """Update centralized stock system for invoice items"""
+        from products.models import CentralStock, StockMovement
+        
+        try:
+            # Only update stock if invoice is not in draft status
+            if self.invoice.status == 'draft':
+                return
+            
+            quantity_change = self.quantity - old_quantity
+            
+            if quantity_change == 0:
+                return
+            
+            # Get salesman stock from central stock
+            try:
+                salesman_stock = CentralStock.objects.get(
+                    product=self.product,
+                    location_type='salesman',
+                    location_id=self.invoice.salesman.id
+                )
+                
+                # Check if salesman has enough stock
+                if quantity_change > 0 and salesman_stock.quantity < quantity_change:
+                    raise ValueError(f"Insufficient stock for {self.product.name}. Available: {salesman_stock.quantity}, Required: {quantity_change}")
+                
+                # Update salesman stock
+                salesman_stock.quantity -= quantity_change
+                salesman_stock.quantity = max(0, salesman_stock.quantity)
+                salesman_stock.save()
+                
+                # Create stock movement record for salesman
+                StockMovement.objects.create(
+                    product=self.product,
+                    movement_type='sale',
+                    quantity=-quantity_change,  # Negative for outward movement
+                    reference_id=self.invoice.invoice_number,
+                    salesman=self.invoice.salesman,
+                    notes=f"Invoice sale: {self.invoice.invoice_number}",
+                    created_by=self.invoice.created_by
+                )
+                
+            except CentralStock.DoesNotExist:
+                raise ValueError(f"No stock allocation found for {self.product.name} for salesman {self.invoice.salesman.name}")
+            
+        except Exception as e:
+            # Log the error but don't break the save process
+            print(f"Error updating stock quantities: {e}")
+            # In production, you might want to raise the exception to prevent the save
+            raise e
+    
+    def _restore_stock_quantities(self):
+        """Restore stock quantities when invoice item is deleted"""
+        from products.models import CentralStock, StockMovement
+        
+        try:
+            # Only restore stock if invoice is not in draft status
+            if self.invoice.status == 'draft':
+                return
+            
+            # Restore salesman stock
+            try:
+                salesman_stock = CentralStock.objects.get(
+                    product=self.product,
+                    location_type='salesman',
+                    location_id=self.invoice.salesman.id
+                )
+                salesman_stock.quantity += self.quantity
+                salesman_stock.save()
+                
+                # Create stock movement record for salesman
+                StockMovement.objects.create(
+                    product=self.product,
+                    movement_type='return',
+                    quantity=self.quantity,  # Positive for inward movement
+                    reference_id=f"DEL-{self.invoice.invoice_number}",
+                    salesman=self.invoice.salesman,
+                    notes=f"Invoice item deleted: {self.invoice.invoice_number}",
+                    created_by=self.invoice.created_by
+                )
+                
+            except CentralStock.DoesNotExist:
+                pass  # If no stock record exists, nothing to restore
+            
+        except Exception as e:
+            print(f"Error restoring stock quantities: {e}")
     
     def get_line_total(self):
         """Get the line total for this invoice item"""

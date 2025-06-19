@@ -18,7 +18,7 @@ from .serializers import (
     SettlementPaymentSerializer, MultiPaymentSettlementSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
-from products.models import SalesmanStock, StockMovement
+from products.models import CentralStock, StockMovement
 
 User = get_user_model()
 

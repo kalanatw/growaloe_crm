@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Category, Product, SalesmanStock, StockMovement
+from .models import Category, Product, SalesmanStock, StockMovement, CentralStock
 
 
 @admin.register(Category)
@@ -11,17 +11,29 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'sku', 'category', 'base_price', 'stock_quantity', 
-                   'min_stock_level', 'is_low_stock', 'is_active')
+    list_display = ('name', 'sku', 'category', 'base_price', 'total_stock', 
+                   'owner_stock', 'salesman_stock', 'min_stock_level', 'is_low_stock', 'is_active')
     list_filter = ('category', 'is_active', 'created_at')
     search_fields = ('name', 'sku', 'description')
     raw_id_fields = ('created_by',)
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'total_stock', 'owner_stock', 'salesman_stock')
     
     def is_low_stock(self, obj):
         return obj.is_low_stock
     is_low_stock.boolean = True
     is_low_stock.short_description = 'Low Stock'
+
+
+@admin.register(CentralStock)
+class CentralStockAdmin(admin.ModelAdmin):
+    list_display = ('product', 'location_type', 'location_name', 'quantity', 'updated_at')
+    list_filter = ('location_type', 'product__category')
+    search_fields = ('product__name', 'product__sku')
+    readonly_fields = ('created_at', 'updated_at')
+    
+    def location_name(self, obj):
+        return obj.location_name
+    location_name.short_description = 'Location'
 
 
 @admin.register(SalesmanStock)

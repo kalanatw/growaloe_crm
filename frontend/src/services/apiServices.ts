@@ -364,4 +364,38 @@ export const deliveryService = {
   markAsDelivered: async (id: number): Promise<Delivery> => {
     return apiClient.post<Delivery>(`/products/deliveries/${id}/mark_delivered/`);
   },
+
+  getSettlementData: async (id: number): Promise<{
+    delivery_id: number;
+    delivery_number: string;
+    salesman_name: string;
+    delivery_date: string;
+    items: Array<{
+      delivery_item_id: number;
+      product_id: number;
+      product_name: string;
+      delivered_quantity: number;
+      sold_quantity: number;
+      remaining_quantity: number;
+      margin_earned: number;
+    }>;
+  }> => {
+    return apiClient.get(`/products/deliveries/${id}/settlement_data/`);
+  },
+
+  settleDelivery: async (id: number, data: {
+    settlement_notes?: string;
+    items: Array<{
+      delivery_item_id: number;
+      remaining_quantity: number;
+      margin_earned: number;
+    }>;
+  }): Promise<{
+    status: string;
+    settlement_date: string;
+    total_margin_earned: number;
+    message: string;
+  }> => {
+    return apiClient.post(`/products/deliveries/${id}/settle/`, data);
+  },
 };

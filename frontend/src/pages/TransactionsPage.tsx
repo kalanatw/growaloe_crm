@@ -1,11 +1,15 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Layout } from '../components/Layout';
-import { LoadingCard } from '../components/LoadingSpinner';
+import { LoadingCard, LoadingSpinner } from '../components/LoadingSpinner';
 import { 
+  PlusIcon, 
+  MagnifyingGlassIcon,
   ArrowUpIcon,
   ArrowDownIcon,
   CurrencyDollarIcon,
   BanknotesIcon,
+  CalendarIcon,
+  FunnelIcon,
   DocumentTextIcon
 } from '@heroicons/react/24/outline';
 import { 
@@ -19,17 +23,18 @@ import {
   BankBookEntry
 } from '../types';
 import { formatCurrency } from '../utils/currency';
-import { getResponsiveFontSize, getCardAmountClass } from '../utils/responsiveFonts';
+import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
 import { useForm } from 'react-hook-form';
 
 export const TransactionsPage: React.FC = () => {
+  const { user } = useAuth();
   const [dashboard, setDashboard] = useState<FinancialDashboard | null>(null);
   const [bankBook, setBankBook] = useState<BankBookEntry[]>([]);
-  const [transactions, setTransactions] = useState<FinancialTransaction[]>([]); // For future transaction list view
+  const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddTransaction, setShowAddTransaction] = useState(false);
-  const [transactionType, setTransactionType] = useState<'debit' | 'credit'>('credit'); // For modal state
+  const [transactionType, setTransactionType] = useState<'credit' | 'debit'>('credit');
   const [dateRange, setDateRange] = useState({
     date_from: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0],
     date_to: new Date().toISOString().split('T')[0]
@@ -46,7 +51,11 @@ export const TransactionsPage: React.FC = () => {
 
   const watchTransactionType = watch('transaction_type', 'credit');
 
-  const loadFinancialData = useCallback(async () => {
+  useEffect(() => {
+    loadFinancialData();
+  }, [dateRange]);
+
+  const loadFinancialData = async () => {
     try {
       setLoading(true);
       
@@ -63,23 +72,15 @@ export const TransactionsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [dateRange.date_from, dateRange.date_to]);
-
-  useEffect(() => {
-    loadFinancialData();
-    // Suppress lint warnings for variables used in event handlers
-    console.debug('Transaction state initialized:', { transactionType, transactions: transactions.length });
-  }, [dateRange, loadFinancialData]);
+  };
 
   const loadTransactions = async () => {
     try {
-      const data = await financialTransactionService.getTransactions({
+      const data: any = await financialTransactionService.getTransactions({
         date_from: dateRange.date_from,
         date_to: dateRange.date_to
       });
-      // Handle paginated response or direct array
-      const transactionsData = Array.isArray(data) ? data : (data as any)?.results || [];
-      setTransactions(transactionsData);
+      setTransactions(data.results || data);
     } catch (error) {
       console.error('Error loading transactions:', error);
       toast.error('Failed to load transactions');
@@ -89,7 +90,7 @@ export const TransactionsPage: React.FC = () => {
   const handleCreateTransaction = async (data: CreateFinancialTransactionData) => {
     try {
       await financialTransactionService.createTransaction(data);
-      toast.success(`${data.transaction_type === 'credit' ? 'Credit' : 'Debit'} transaction added successfully!`);
+      toast.success(`${data.transaction_type === 'credit' ? 'Income' : 'Expense'} transaction added successfully!`);
       setShowAddTransaction(false);
       reset();
       loadFinancialData();
@@ -139,7 +140,7 @@ export const TransactionsPage: React.FC = () => {
               className="btn-primary flex items-center space-x-2"
             >
               <ArrowUpIcon className="h-4 w-4" />
-              <span>Add Credit</span>
+              <span>Add Income</span>
             </button>
             <button
               onClick={() => {
@@ -227,11 +228,11 @@ export const TransactionsPage: React.FC = () => {
                   <div className="flex-shrink-0 p-3 rounded-lg bg-green-500">
                     <ArrowUpIcon className="h-6 w-6 text-white" />
                   </div>
-                  <div className="ml-4 flex-1 min-w-0">
+                  <div className="ml-4">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                      Total Credits
+                      Total Income
                     </p>
-                    <p className={`${getCardAmountClass(dashboard.transactions.total_credits)} text-gray-900 dark:text-white`}>
+                    <p className="text-2xl font-semibold text-gray-900 dark:text-white">
                       {formatCurrency(dashboard.transactions.total_credits)}
                     </p>
                   </div>
@@ -243,11 +244,11 @@ export const TransactionsPage: React.FC = () => {
                   <div className="flex-shrink-0 p-3 rounded-lg bg-red-500">
                     <ArrowDownIcon className="h-6 w-6 text-white" />
                   </div>
-                  <div className="ml-4 flex-1 min-w-0">
+                  <div className="ml-4">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                      Total Debits
+                      Total Expenses
                     </p>
-                    <p className={`${getCardAmountClass(dashboard.transactions.total_debits)} text-gray-900 dark:text-white`}>
+                    <p className="text-2xl font-semibold text-gray-900 dark:text-white">
                       {formatCurrency(dashboard.transactions.total_debits)}
                     </p>
                   </div>
@@ -259,16 +260,16 @@ export const TransactionsPage: React.FC = () => {
                   <div className="flex-shrink-0 p-3 rounded-lg bg-blue-500">
                     <CurrencyDollarIcon className="h-6 w-6 text-white" />
                   </div>
-                  <div className="ml-4 flex-1 min-w-0">
+                  <div className="ml-4">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                      Net Balance (Profit)
+                      Cash Flow
                     </p>
-                    <p className={`${getCardAmountClass(dashboard.transactions.net_balance)} ${
-                      dashboard.transactions.net_balance >= 0 
+                    <p className={`text-2xl font-semibold ${
+                      dashboard.cash_flow.net_cash_flow >= 0 
                         ? 'text-green-600 dark:text-green-400' 
                         : 'text-red-600 dark:text-red-400'
                     }`}>
-                      {formatCurrency(dashboard.transactions.net_balance)}
+                      {formatCurrency(dashboard.cash_flow.net_cash_flow)}
                     </p>
                   </div>
                 </div>
@@ -279,11 +280,11 @@ export const TransactionsPage: React.FC = () => {
                   <div className="flex-shrink-0 p-3 rounded-lg bg-purple-500">
                     <DocumentTextIcon className="h-6 w-6 text-white" />
                   </div>
-                  <div className="ml-4 flex-1 min-w-0">
+                  <div className="ml-4">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                       Outstanding
                     </p>
-                    <p className={`${getCardAmountClass(dashboard.invoices.total_outstanding)} text-gray-900 dark:text-white`}>
+                    <p className="text-2xl font-semibold text-gray-900 dark:text-white">
                       {formatCurrency(dashboard.invoices.total_outstanding)}
                     </p>
                   </div>
@@ -298,25 +299,25 @@ export const TransactionsPage: React.FC = () => {
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="text-center">
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Current Profit</p>
-                  <p className={`${getResponsiveFontSize(dashboard.summary.profit)} font-bold text-blue-600 dark:text-blue-400`}>
-                    {formatCurrency(dashboard.summary.profit)}
-                  </p>
-                  <p className="text-xs text-gray-500">Credits - Debits</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Outstanding Receivables</p>
-                  <p className={`${getResponsiveFontSize(dashboard.summary.outstanding_receivables)} font-bold text-green-600 dark:text-green-400`}>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Assets</p>
+                  <p className="text-xl font-bold text-blue-600 dark:text-blue-400">
                     {formatCurrency(dashboard.summary.outstanding_receivables)}
                   </p>
-                  <p className="text-xs text-gray-500">Money Owed to Us</p>
+                  <p className="text-xs text-gray-500">Cash + Outstanding Invoices</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Total Business Value</p>
-                  <p className={`${getResponsiveFontSize(dashboard.summary.total_business_value)} font-bold text-purple-600 dark:text-purple-400`}>
-                    {formatCurrency(dashboard.summary.total_business_value)}
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Equity</p>
+                  <p className="text-xl font-bold text-green-600 dark:text-green-400">
+                    {formatCurrency(dashboard.summary.profit)}
                   </p>
-                  <p className="text-xs text-gray-500">Profit + Outstanding</p>
+                  <p className="text-xs text-gray-500">Net Worth</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Liabilities</p>
+                  <p className="text-xl font-bold text-red-600 dark:text-red-400">
+                    {formatCurrency(dashboard.transactions.total_debits)}
+                  </p>
+                  <p className="text-xs text-gray-500">Total Expenses</p>
                 </div>
               </div>
             </div>
@@ -349,7 +350,7 @@ export const TransactionsPage: React.FC = () => {
                 </h3>
                 <div className="space-y-3">
                   <div className="flex justify-between">
-                    <span className="text-gray-600 dark:text-gray-400">Credit Transactions:</span>
+                    <span className="text-gray-600 dark:text-gray-400">Income Transactions:</span>
                     <span className="font-semibold text-green-600">{formatCurrency(dashboard.transactions.total_credits)}</span>
                   </div>
                   <div className="flex justify-between">
@@ -357,15 +358,15 @@ export const TransactionsPage: React.FC = () => {
                     <span className="font-semibold text-green-600">{formatCurrency(dashboard.invoices.total_collected)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600 dark:text-gray-400">Debit Transactions:</span>
+                    <span className="text-gray-600 dark:text-gray-400">Total Expenses:</span>
                     <span className="font-semibold text-red-600">{formatCurrency(dashboard.transactions.total_debits)}</span>
                   </div>
                   <div className="flex justify-between border-t pt-2">
-                    <span className="text-gray-900 dark:text-white font-semibold">Net Balance (Profit):</span>
+                    <span className="text-gray-900 dark:text-white font-semibold">Net Cash Flow:</span>
                     <span className={`font-bold ${
-                      dashboard.transactions.net_balance >= 0 ? 'text-green-600' : 'text-red-600'
+                      dashboard.cash_flow.net_cash_flow >= 0 ? 'text-green-600' : 'text-red-600'
                     }`}>
-                      {formatCurrency(dashboard.transactions.net_balance)}
+                      {formatCurrency(dashboard.cash_flow.net_cash_flow)}
                     </span>
                   </div>
                 </div>
@@ -400,10 +401,10 @@ export const TransactionsPage: React.FC = () => {
                       Reference
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Credit
+                      Money In
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Debit
+                      Money Out
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Balance
@@ -429,20 +430,20 @@ export const TransactionsPage: React.FC = () => {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                         {entry.credit > 0 ? (
-                          <span className={`text-green-600 font-semibold ${getResponsiveFontSize(entry.credit)}`}>
+                          <span className="text-green-600 font-semibold">
                             {formatCurrency(entry.credit)}
                           </span>
                         ) : '-'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                         {entry.debit > 0 ? (
-                          <span className={`text-red-600 font-semibold ${getResponsiveFontSize(entry.debit)}`}>
+                          <span className="text-red-600 font-semibold">
                             {formatCurrency(entry.debit)}
                           </span>
                         ) : '-'}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
-                        <span className={`font-semibold ${getResponsiveFontSize(entry.balance)} ${entry.balance >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-semibold">
+                        <span className={entry.balance >= 0 ? 'text-green-600' : 'text-red-600'}>
                           {formatCurrency(entry.balance)}
                         </span>
                       </td>
@@ -452,93 +453,6 @@ export const TransactionsPage: React.FC = () => {
                     <tr>
                       <td colSpan={6} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
                         No transactions found for the selected period
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* Transactions View */}
-        {view === 'transactions' && (
-          <div className="bg-white dark:bg-gray-800 shadow rounded-lg">
-            <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-                Financial Transactions
-              </h2>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                All business income and expense transactions
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead className="bg-gray-50 dark:bg-gray-700">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Date
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Description
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Type
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Category
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Reference
-                    </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Amount
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-                  {transactions.map((transaction) => (
-                    <tr key={transaction.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                        {new Date(transaction.date).toLocaleDateString()}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">
-                        <div>
-                          {transaction.description}
-                          {transaction.notes && (
-                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                              {transaction.notes}
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                          transaction.transaction_type === 'credit'
-                            ? 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100'
-                            : 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100'
-                        }`}>
-                          {transaction.transaction_type === 'credit' ? 'Credit' : 'Debit'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {transaction.category}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                        {transaction.reference_number || '-'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-semibold">
-                        <span className={`${getResponsiveFontSize(transaction.amount)} ${transaction.transaction_type === 'credit' ? 'text-green-600' : 'text-red-600'}`}>
-                          {transaction.transaction_type === 'credit' ? '+' : '-'}
-                          {formatCurrency(transaction.amount)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {transactions.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
-                        No transactions found for the selected date range.
                       </td>
                     </tr>
                   )}
@@ -561,7 +475,7 @@ export const TransactionsPage: React.FC = () => {
                   <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-medium text-gray-900 dark:text-white">
-                        Add {watchTransactionType === 'credit' ? 'Credit' : 'Debit'} Transaction
+                        Add {watchTransactionType === 'credit' ? 'Income' : 'Expense'} Transaction
                       </h3>
                       <button
                         type="button"
@@ -582,8 +496,8 @@ export const TransactionsPage: React.FC = () => {
                           {...register('transaction_type', { required: 'Transaction type is required' })}
                           className="input"
                         >
-                          <option value="credit">Credit</option>
-                          <option value="debit">Debit</option>
+                          <option value="income">Income</option>
+                          <option value="expense">Expense</option>
                         </select>
                       </div>
 
