@@ -25,12 +25,16 @@ interface SidebarProps {
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Products & Stock', href: '/products', icon: Package },
-  { name: 'Create Invoice', href: '/invoices/create', icon: FileText },
   { name: 'Invoice History', href: '/invoices', icon: FileText },
   { name: 'Shops', href: '/shops', icon: Users },
   { name: 'Invoice Settlement', href: '/invoice-settlement', icon: Receipt },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
 ];
+
+// Role-specific navigation items - now unified since NewCreateInvoicePage handles both
+const getCreateInvoiceItem = (userRole: string | undefined) => {
+  return { name: 'Create Invoice', href: '/invoices/create', icon: FileText };
+};
 
 // Owner-only navigation items
 const ownerNavigation = [
@@ -102,6 +106,29 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {
                 </Link>
               );
             })}
+            
+            {/* Role-specific Create Invoice item */}
+            {(() => {
+              const createInvoiceItem = getCreateInvoiceItem(user?.role);
+              const isActive = location.pathname === createInvoiceItem.href || 
+                              (location.pathname === '/invoices/create-batch' && createInvoiceItem.href === '/invoices/create-batch') ||
+                              (location.pathname === '/invoices/create' && createInvoiceItem.href === '/invoices/create');
+              return (
+                <Link
+                  key={createInvoiceItem.name}
+                  to={createInvoiceItem.href}
+                  className={`flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors duration-200 ${
+                    isActive
+                      ? 'bg-primary-100 text-primary-700 dark:bg-primary-900 dark:text-primary-200'
+                      : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'
+                  }`}
+                  onClick={() => setIsOpen(false)}
+                >
+                  <createInvoiceItem.icon className="mr-3 h-5 w-5" />
+                  {createInvoiceItem.name}
+                </Link>
+              );
+            })()}
             
             {/* Owner-only navigation */}
             {user?.role === USER_ROLES.OWNER && (

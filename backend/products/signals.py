@@ -1,14 +1,16 @@
 from django.db.models.signals import pre_save, post_save, pre_delete
 from django.dispatch import receiver
 from django.core.exceptions import ValidationError
-from .models import Product, DeliveryItem, Delivery, CentralStock
+from django.db.models import F, Sum
+from django.utils import timezone
+from .models import Product, DeliveryItem, Delivery, CentralStock, BatchAssignment
 from sales.models import InvoiceItem, Invoice
 
 
 @receiver(pre_save, sender=InvoiceItem)
 def validate_invoice_item_stock(sender, instance, **kwargs):
     """
-    Validate that there's enough stock before saving an invoice item
+    Validate that there's enough stock before saving an invoice item using batch system
     """
     # Skip validation for draft invoices
     if instance.invoice.status == 'draft':
@@ -23,13 +25,27 @@ def validate_invoice_item_stock(sender, instance, **kwargs):
         except InvoiceItem.DoesNotExist:
             pass
     
-    # Check salesman stock availability in central stock
+    # Check salesman stock availability using batch assignments
     try:
-        salesman_stock = CentralStock.objects.get(
-            product=instance.product,
-            location_type='salesman',
-            location_id=instance.invoice.salesman.id
-        )
+        # Get total available quantity from batch assignments
+        assignments = BatchAssignment.objects.filter(
+            salesman=instance.invoice.salesman,
+            batch__product=instance.product,
+            status__in=['delivered', 'partial'],
+            batch__is_active=True
+        ).exclude(
+            batch__expiry_date__lt=timezone.now().date()
+        ).annotate(
+            available_qty=F('delivered_quantity') - F('returned_quantity')
+        ).filter(available_qty__gt=0)
+        
+        total_available = sum(assignment.available_qty for assignment in assignments)
+        
+        if total_available == 0:
+            raise ValidationError(
+                f"No stock allocation found for {instance.product.name} "
+                f"for salesman {instance.invoice.salesman.name}"
+            )
         
         required_quantity = instance.quantity
         if instance.pk:
@@ -37,15 +53,15 @@ def validate_invoice_item_stock(sender, instance, **kwargs):
             old_instance = InvoiceItem.objects.get(pk=instance.pk)
             required_quantity = instance.quantity - old_instance.quantity
         
-        if required_quantity > 0 and salesman_stock.quantity < required_quantity:
+        if required_quantity > 0 and total_available < required_quantity:
             raise ValidationError(
                 f"Insufficient stock for {instance.product.name}. "
-                f"Available: {salesman_stock.quantity}, Required: {required_quantity}"
+                f"Available: {total_available}, Required: {required_quantity}"
             )
-    except CentralStock.DoesNotExist:
+    except Exception as e:
+        # Handle any other database errors gracefully
         raise ValidationError(
-            f"No stock allocation found for {instance.product.name} "
-            f"for salesman {instance.invoice.salesman.name}"
+            f"Error checking stock for {instance.product.name}: {str(e)}"
         )
 
 
@@ -70,19 +86,26 @@ def validate_delivery_item_stock(sender, instance, **kwargs):
     if required_quantity > 0:
         # Check owner stock in central stock
         try:
-            owner_stock = CentralStock.objects.get(
+            owner_stock = CentralStock.objects.filter(
                 product=instance.product,
                 location_type='owner',
                 location_id=None
-            )
+            ).first()
+            
+            if not owner_stock:
+                raise ValidationError(
+                    f"No owner stock found for {instance.product.name}"
+                )
+                
             if owner_stock.quantity < required_quantity:
                 raise ValidationError(
                     f"Insufficient owner stock for {instance.product.name}. "
                     f"Available: {owner_stock.quantity}, Required: {required_quantity}"
                 )
-        except CentralStock.DoesNotExist:
+        except Exception as e:
+            # Handle any other database errors gracefully
             raise ValidationError(
-                f"No owner stock found for {instance.product.name}"
+                f"Error checking owner stock for {instance.product.name}: {str(e)}"
             )
 
 

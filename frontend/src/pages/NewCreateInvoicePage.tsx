@@ -14,7 +14,7 @@ import {
   Package
 } from 'lucide-react';
 import { shopService, productService, invoiceService, companyService } from '../services/apiServices';
-import { Shop, SalesmanStock, CreateInvoiceData } from '../types';
+import { Shop, SalesmanStock, CreateInvoiceData, SalesmanAvailableProduct, CreateSimplifiedInvoiceData } from '../types';
 import toast from 'react-hot-toast';
 import { formatCurrency } from '../utils/currency';
 import { useAuth } from '../contexts/AuthContext';
@@ -130,19 +130,39 @@ export const NewCreateInvoicePage: React.FC = () => {
     try {
       setIsLoading(true);
       
-      // Choose the appropriate stock endpoint based on user role
-      const stockPromise = userRole === 'owner' || userRole === 'developer' 
-        ? productService.getProductsForInvoice()
-        : productService.getMySalesmanStock();
+      let stockData = [];
       
-      const [shopsData, stockDataResponse, companySettings] = await Promise.all([
+      if (userRole === 'owner' || userRole === 'developer') {
+        // For owners/developers, use the existing products for invoice endpoint
+        const stockDataResponse = await productService.getProductsForInvoice();
+        stockData = stockDataResponse.stocks;
+      } else {
+        // For salesmen, use simplified available products endpoint
+        const availableProducts = await productService.getSalesmanAvailableProducts();
+        
+        // Convert SalesmanAvailableProduct to SalesmanStock format for compatibility
+        stockData = availableProducts.map(product => ({
+          id: product.product_id,
+          salesman: 0,
+          salesman_name: '',
+          product: product.product_id,
+          product_name: product.product_name,
+          product_sku: product.product_sku,
+          product_base_price: product.base_price,
+          allocated_quantity: 0,
+          available_quantity: product.total_available_quantity,
+          created_at: '',
+          updated_at: '',
+        }));
+      }
+      
+      const [shopsData, companySettings] = await Promise.all([
         shopService.getShops(),
-        stockPromise,
         companyService.getPublicSettings(),
       ]);
 
       setShops(shopsData.results);
-      setStockData(stockDataResponse.stocks);
+      setStockData(stockData);
       setMaxShopMargin(companySettings.max_shop_margin_for_salesmen);
     } catch (error) {
       console.error('Error loading data:', error);
@@ -316,24 +336,48 @@ export const NewCreateInvoicePage: React.FC = () => {
     try {
       setIsSubmitting(true);
 
-      const invoiceData: CreateInvoiceData = {
-        shop: selectedShop.id,
-        due_date: invoiceDetails.due_date || undefined,
-        tax_amount: invoiceDetails.tax_amount,
-        discount_amount: invoiceDetails.discount_amount,
-        shop_margin: invoiceDetails.shop_margin,
-        notes: invoiceDetails.notes,
-        terms_conditions: invoiceDetails.terms_conditions,
-        items: invoiceItems.map(item => ({
-          product: item.product.product,
-          quantity: item.quantity,
-          unit_price: item.unit_price,
-          salesman_margin: 0, // No individual salesman margins
-          shop_margin: 0, // Shop margin applied at invoice level now
-        })),
-      };
+      let invoice;
 
-      const invoice = await invoiceService.createInvoice(invoiceData);
+      if (userRole === 'salesman') {
+        // Use simplified API for salesmen
+        const simplifiedInvoiceData: CreateSimplifiedInvoiceData = {
+          shop: selectedShop.id,
+          due_date: invoiceDetails.due_date || undefined,
+          tax_amount: invoiceDetails.tax_amount,
+          discount_amount: invoiceDetails.discount_amount,
+          shop_margin: invoiceDetails.shop_margin,
+          notes: invoiceDetails.notes,
+          terms_conditions: invoiceDetails.terms_conditions,
+          items: invoiceItems.map(item => ({
+            product: item.product.product,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+          })),
+        };
+
+        invoice = await invoiceService.createSimplifiedInvoice(simplifiedInvoiceData);
+      } else {
+        // Use original API for owners/developers
+        const invoiceData: CreateInvoiceData = {
+          shop: selectedShop.id,
+          due_date: invoiceDetails.due_date || undefined,
+          tax_amount: invoiceDetails.tax_amount,
+          discount_amount: invoiceDetails.discount_amount,
+          shop_margin: invoiceDetails.shop_margin,
+          notes: invoiceDetails.notes,
+          terms_conditions: invoiceDetails.terms_conditions,
+          items: invoiceItems.map(item => ({
+            product: item.product.product,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+            salesman_margin: 0, // No individual salesman margins
+            shop_margin: 0, // Shop margin applied at invoice level now
+          })),
+        };
+
+        invoice = await invoiceService.createInvoice(invoiceData);
+      }
+
       toast.success('Invoice created successfully!');
 
       // Automatically download PDF

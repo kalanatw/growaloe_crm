@@ -9,9 +9,11 @@ import { INVOICE_STATUS } from '../config/constants';
 import { format } from 'date-fns';
 import { formatCurrency } from '../utils/currency';
 import { getCardAmountClass, getTableAmountClass } from '../utils/responsiveFonts';
+import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
 
 export const InvoicesPage: React.FC = () => {
+  const { user } = useAuth();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
@@ -192,6 +194,7 @@ export const InvoicesPage: React.FC = () => {
               </select>
             </div>
 
+            {/* Create Invoice Button */}
             <Link to="/invoices/create" className="btn-primary">
               <Plus className="h-4 w-4 mr-2" />
               Create Invoice

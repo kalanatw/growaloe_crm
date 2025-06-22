@@ -3,6 +3,9 @@ import { apiClient } from './api';
 export interface StockAddition {
   quantity: number;
   notes?: string;
+  batch_number?: string;
+  expiry_date?: string;
+  cost_per_unit?: number;
 }
 
 export interface StockReduction {
@@ -31,6 +34,8 @@ export interface StockOperationResult {
   new_quantity: number;
   added_quantity?: number;
   reduced_quantity?: number;
+  batch_id?: number;
+  batch_number?: string;
 }
 
 class StockManagementService {
@@ -58,11 +63,11 @@ class StockManagementService {
   }
 
   /**
-   * Get real-time stock status for a product
+   * Get real-time stock status for a product (batch-based)
    */
   async getStockStatus(productId: number): Promise<StockStatus> {
-    const response = await apiClient.get(`/products/products/${productId}/stock_status/`);
-    return (response as any).data;
+    const response = await apiClient.get(`/products/products/${productId}/batch_stock_status/`);
+    return response as StockStatus;
   }
 
   /**
@@ -81,31 +86,31 @@ class StockManagementService {
   }
 
   /**
-   * Validate stock availability for invoice creation
+   * Validate stock availability for invoice creation (batch-based)
    */
   async validateStockForInvoice(
     salesmanId: number, 
     items: Array<{ productId: number; quantity: number }>
   ): Promise<{ valid: boolean; errors: string[] }> {
     try {
-      // Get salesman stock for validation
-      const salesmanStockResponse = await apiClient.get(`/products/salesman-stock/?salesman=${salesmanId}`);
-      const salesmanStock = (salesmanStockResponse as any).data.results || (salesmanStockResponse as any).data;
+      // Get salesman available products for validation
+      const salesmanProductsResponse = await apiClient.get('/products/products/salesman-available-products/');
+      const salesmanProducts = salesmanProductsResponse as any[];
       
       const errors: string[] = [];
       
       for (const item of items) {
-        const stock = salesmanStock.find((s: any) => s.product === item.productId);
+        const product = salesmanProducts.find((p: any) => p.product_id === item.productId);
         
-        if (!stock) {
+        if (!product) {
           errors.push(`No stock allocation found for product ID ${item.productId}`);
           continue;
         }
         
-        if (stock.available_quantity < item.quantity) {
+        if (product.total_available_quantity < item.quantity) {
           errors.push(
-            `Insufficient stock for ${stock.product_name}. ` +
-            `Available: ${stock.available_quantity}, Required: ${item.quantity}`
+            `Insufficient stock for ${product.product_name}. ` +
+            `Available: ${product.total_available_quantity}, Required: ${item.quantity}`
           );
         }
       }
@@ -124,7 +129,7 @@ class StockManagementService {
   }
 
   /**
-   * Get low stock alerts
+   * Get low stock alerts (batch-based)
    */
   async getLowStockAlerts(): Promise<Array<{
     product_id: number;
@@ -134,17 +139,17 @@ class StockManagementService {
     shortage: number;
   }>> {
     try {
-      const response = await apiClient.get('/products/products/');
-      const products = (response as any).data.results || (response as any).data;
+      const response = await apiClient.get('/products/products/stock_summary/');
+      const stockSummary = (response as any).results || (response as any);
       
-      return products
-        .filter((product: any) => product.stock_quantity <= product.min_stock_level)
-        .map((product: any) => ({
-          product_id: product.id,
-          product_name: product.name,
-          current_stock: product.stock_quantity,
-          min_stock_level: product.min_stock_level,
-          shortage: product.min_stock_level - product.stock_quantity
+      return stockSummary
+        .filter((item: any) => item.total_quantity <= item.min_stock_level)
+        .map((item: any) => ({
+          product_id: item.product_id,
+          product_name: item.product_name,
+          current_stock: item.total_quantity,
+          min_stock_level: item.min_stock_level,
+          shortage: item.min_stock_level - item.total_quantity
         }));
     } catch (error) {
       console.error('Error getting low stock alerts:', error);

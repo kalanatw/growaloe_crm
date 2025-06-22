@@ -15,7 +15,8 @@ from .serializers import (
     InvoiceSerializer, InvoiceCreateSerializer, InvoiceItemSerializer,
     TransactionSerializer, ReturnSerializer, InvoiceSummarySerializer,
     SalesPerformanceSerializer, InvoiceSettlementSerializer, 
-    SettlementPaymentSerializer, MultiPaymentSettlementSerializer
+    SettlementPaymentSerializer, MultiPaymentSettlementSerializer,
+    BatchInvoiceCreateSerializer, AutoBatchInvoiceCreateSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 from products.models import CentralStock, StockMovement
@@ -150,6 +151,9 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
     def get_serializer_class(self):
         if self.action == 'create':
+            # Use simplified auto-batch serializer for salesmen
+            if self.request.user.role == 'salesman':
+                return AutoBatchInvoiceCreateSerializer
             return InvoiceCreateSerializer
         return InvoiceSerializer
 

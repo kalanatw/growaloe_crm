@@ -167,11 +167,15 @@ export const ProductsPage: React.FC = () => {
     try {
       setIsSubmitting(true);
       
-      // Only require retail price (base_price), set cost_price to 0 if not provided
+      // Clean up the data - remove empty strings and convert them to undefined/null
       const productData = {
         ...data,
-        cost_price: 0, // Simplified: no cost price needed
-        unit: data.unit || 'pcs' // Default unit
+        category: data.category || undefined, // Convert empty string to undefined
+        cost_price: 0, // Simplified: no cost price needed for creation
+        unit: data.unit || 'pcs', // Default unit
+        stock_quantity: data.stock_quantity || 0, // Default to 0 if not provided
+        min_stock_level: data.min_stock_level || 0, // Default to 0 if not provided
+        is_active: data.is_active !== false // Default to true
       };
       
       if (selectedProduct) {
@@ -181,7 +185,7 @@ export const ProductsPage: React.FC = () => {
       } else {
         // Create new product
         await productService.createProduct(productData);
-        toast.success('Product created successfully!');
+        toast.success('Product created successfully! Stock can be managed separately.');
       }
       
       setIsProductModalOpen(false);
@@ -190,7 +194,11 @@ export const ProductsPage: React.FC = () => {
       loadInitialData();
     } catch (error: any) {
       console.error('Error saving product:', error);
-      toast.error(error.response?.data?.detail || `Failed to ${selectedProduct ? 'update' : 'create'} product`);
+      const errorMessage = error.response?.data?.detail || 
+                          error.response?.data?.sku?.[0] || 
+                          error.response?.data?.base_price?.[0] ||
+                          `Failed to ${selectedProduct ? 'update' : 'create'} product`;
+      toast.error(errorMessage);
     } finally {
       setIsSubmitting(false);
     }
@@ -709,21 +717,21 @@ export const ProductsPage: React.FC = () => {
                       </div>
 
                       <div>
-                        <label className="label">Category *</label>
+                        <label className="label">Category</label>
                         <select
-                          {...register('category', { required: 'Category is required' })}
+                          {...register('category')}
                           className="input"
                         >
-                          <option value="">Select category</option>
+                          <option value="">Select category (optional)</option>
                           {categories.map((category) => (
                             <option key={category.id} value={category.id}>
                               {category.name}
                             </option>
                           ))}
                         </select>
-                        {errors.category && (
-                          <p className="mt-1 text-sm text-red-600">{errors.category.message}</p>
-                        )}
+                        <p className="mt-1 text-xs text-gray-500">
+                          Category is optional and can be set later
+                        </p>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -776,6 +784,9 @@ export const ProductsPage: React.FC = () => {
                           {errors.stock_quantity && (
                             <p className="mt-1 text-sm text-red-600">{errors.stock_quantity.message}</p>
                           )}
+                          <p className="mt-1 text-xs text-gray-500">
+                            Optional - Stock can be managed separately later
+                          </p>
                         </div>
 
                         <div>

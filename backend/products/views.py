@@ -5,20 +5,25 @@ from django.db.models import Q, Sum, Count, F
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.db import transaction
+from datetime import datetime, timedelta
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
+import logging
 
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, CentralStock
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, CentralStock, Batch, BatchTransaction, BatchAssignment
 from .serializers import (
-    CategorySerializer, ProductSerializer, SalesmanStockSerializer,
+    CategorySerializer, ProductSerializer, ProductCreateSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
     SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
-    DeliveryItemSerializer, DeliverySettlementSerializer, SettleDeliverySerializer
+    DeliveryItemSerializer, DeliverySettlementSerializer, SettleDeliverySerializer,
+    BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 
 User = get_user_model()
+db_logger = logging.getLogger('db_logger')
 
 
 @extend_schema_view(
@@ -236,6 +241,14 @@ class ProductViewSet(viewsets.ModelViewSet):
     ordering_fields = ['name', 'cost_price', 'base_price', 'created_at']
     ordering = ['name']
 
+    def get_serializer_class(self):
+        """
+        Return different serializers based on action
+        """
+        if self.action == 'create':
+            return ProductCreateSerializer
+        return ProductSerializer
+
     def get_queryset(self):
         queryset = super().get_queryset()
         # All roles can view products
@@ -254,18 +267,49 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """
-        Handle product creation with stock tracking
+        Handle product creation with enhanced logging
         """
+        db_logger.info(f"Creating new product by user: {self.request.user.username}")
+        db_logger.info(f"Product data: {serializer.validated_data}")
+        
         product = serializer.save(created_by=self.request.user)
         
-        # No need to create stock movement for initial stock since stock is managed centrally
-        # Initial stock will be added via CentralStock when needed
+        db_logger.info(f"Product created successfully: ID={product.id}, SKU={product.sku}, Name={product.name}")
+        db_logger.info(f"Category: {product.category.name if product.category else 'None'}")
+        
+        # No initial stock creation - stock will be managed via CentralStock separately
 
     def perform_update(self, serializer):
         """
-        Handle product updates - stock is managed via CentralStock, not product fields
+        Handle product updates with enhanced logging
         """
+        original_product = self.get_object()
+        db_logger.info(f"Updating product: ID={original_product.id}, SKU={original_product.sku}")
+        db_logger.info(f"Updated data: {serializer.validated_data}")
+        
         product = serializer.save()
+        
+        db_logger.info(f"Product updated successfully: ID={product.id}, SKU={product.sku}")
+
+    def perform_destroy(self, instance):
+        """
+        Handle product deletion with enhanced logging
+        """
+        db_logger.info(f"Deleting product: ID={instance.id}, SKU={instance.sku}, Name={instance.name}")
+        
+        # Check if product has stock
+        total_stock = CentralStock.objects.filter(product=instance).aggregate(
+            total=Sum('quantity')
+        )['total'] or 0
+        
+        if total_stock > 0:
+            db_logger.warning(f"Attempting to delete product with existing stock: {total_stock}")
+            raise serializers.ValidationError(
+                f"Cannot delete product with existing stock. Current stock: {total_stock}"
+            )
+        
+        super().perform_destroy(instance)
+        db_logger.info(f"Product deleted successfully: ID={instance.id}")
 
     @extend_schema(
         summary="Get stock summary for all products",
@@ -297,45 +341,54 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def stock_summary(self, request):
         """
-        Get stock summary for all products using CentralStock
+        Get stock summary for all products using Batch system (NEW)
         """
+        db_logger.info(f"Stock summary requested by user: {request.user.username}")
+        
         products = Product.objects.filter(is_active=True)
 
         summary_data = []
         for product in products:
-            # Get total stock from CentralStock
-            total_stock = CentralStock.objects.filter(product=product).aggregate(
-                total=Sum('quantity')
-            )['total'] or 0
+            # Get total available stock from Batches (NEW APPROACH)
+            total_stock = Batch.objects.filter(
+                product=product,
+                is_active=True
+            ).aggregate(total=Sum('current_quantity'))['total'] or 0
             
-            # Get allocated stock (salesman stock)
-            allocated_stock = CentralStock.objects.filter(
-                product=product, 
-                location_type='salesman'
-            ).aggregate(total=Sum('quantity'))['total'] or 0
+            # Get allocated stock (assigned to salesmen via BatchAssignments)
+            allocated_stock = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).aggregate(total=Sum('delivered_quantity'))['total'] or 0
             
-            # Get owner stock (available for allocation)
-            owner_stock = CentralStock.objects.filter(
-                product=product, 
-                location_type='owner'
-            ).aggregate(total=Sum('quantity'))['total'] or 0
+            # Get returned stock (returned by salesmen)
+            returned_stock = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).aggregate(total=Sum('returned_quantity'))['total'] or 0
             
-            # Count unique salesmen with this product
-            salesmen_count = CentralStock.objects.filter(
-                product=product, 
-                location_type='salesman'
-            ).values('location_id').distinct().count()
+            # Calculate available stock (total in batches - allocated + returned)
+            # This represents stock available for new deliveries
+            net_allocated = (allocated_stock or 0) - (returned_stock or 0)
+            available_stock = total_stock  # Available for new deliveries
+            
+            # Count unique salesmen with active assignments for this product
+            salesmen_count = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).values('salesman').distinct().count()
 
             summary_data.append({
                 'product_id': product.id,
                 'product_name': product.name,
                 'product_sku': product.sku,
-                'total_stock': total_stock,
-                'allocated_stock': allocated_stock,
-                'available_stock': owner_stock,
+                'total_stock': total_stock,  # Total in all batches
+                'allocated_stock': net_allocated,  # Net allocated to salesmen  
+                'available_stock': available_stock,  # Available for delivery creation
                 'salesmen_count': salesmen_count
             })
 
+        db_logger.info(f"Stock summary generated for {len(summary_data)} products using Batch system")
         serializer = ProductStockSummarySerializer(summary_data, many=True)
         return Response(serializer.data)
 
@@ -447,30 +500,50 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get all active products with owner stock from CentralStock
-        owner_stocks = CentralStock.objects.filter(
-            location_type='owner', 
-            quantity__gt=0
-        ).select_related('product__category')
+        # Get all active products with available batch stock (NEW APPROACH)
+        from decimal import Decimal
+        from django.db.models import DecimalField
+        
+        products_with_stock = Product.objects.filter(
+            is_active=True,
+            batches__current_quantity__gt=0,
+            batches__is_active=True
+        ).distinct().prefetch_related('batches', 'category')
         
         stock_data = []
-        for stock in owner_stocks:
-            product = stock.product
-            if product.is_active:
+        for product in products_with_stock:
+            # Calculate total available quantity from all active batches
+            total_available = Batch.objects.filter(
+                product=product,
+                current_quantity__gt=0,
+                is_active=True
+            ).aggregate(total=Sum('current_quantity'))['total'] or 0
+            
+            if total_available > 0:
+                # Calculate total stock value based on batch costs
+                total_value = Batch.objects.filter(
+                    product=product,
+                    current_quantity__gt=0,
+                    is_active=True
+                ).aggregate(
+                    value=Sum(F('current_quantity') * F('unit_cost'), output_field=DecimalField())
+                )['value'] or Decimal('0.00')
+                
                 stock_data.append({
                     'id': f"product_{product.id}",
                     'product': product.id,
                     'product_name': product.name,
                     'product_sku': product.sku,
                     'product_base_price': float(product.base_price),
-                    'available_quantity': stock.quantity,
+                    'available_quantity': total_available,
                     'category': product.category.name if product.category else 'Uncategorized',
                     # Add fields to match SalesmanStock interface
                     'salesman': None,
-                    'salesman_name': 'Direct Stock',
-                    'allocated_quantity': stock.quantity,
-                    'created_at': stock.created_at.isoformat(),
-                    'updated_at': stock.updated_at.isoformat(),
+                    'salesman_name': 'Batch Stock',
+                    'allocated_quantity': total_available,
+                    'total_value': float(total_value),
+                    'created_at': product.created_at.isoformat(),
+                    'updated_at': product.updated_at.isoformat(),
                 })
         
         return Response({
@@ -478,22 +551,22 @@ class ProductViewSet(viewsets.ModelViewSet):
             'summary': {
                 'total_products': len(stock_data),
                 'total_available_quantity': sum(item['available_quantity'] for item in stock_data),
-                'total_stock_value': sum(
-                    item['product_base_price'] * item['available_quantity'] 
-                    for item in stock_data
-                )
+                'total_stock_value': sum(item.get('total_value', 0) for item in stock_data)
             }
         })
 
     @extend_schema(
         summary="Add stock to product",
-        description="Add stock quantity to a product (Owner/Developer only)",
+        description="Add stock to a product with batch management (Owner/Developer only)",
         request={
             'application/json': {
                 'type': 'object',
                 'properties': {
                     'quantity': {'type': 'integer', 'minimum': 1, 'description': 'Quantity to add'},
-                    'notes': {'type': 'string', 'description': 'Optional notes for the stock addition'}
+                    'notes': {'type': 'string', 'description': 'Optional notes for the stock addition'},
+                    'batch_number': {'type': 'string', 'description': 'Optional batch number (auto-generated if not provided)'},
+                    'expiry_date': {'type': 'string', 'format': 'date', 'description': 'Optional expiry date for the batch'},
+                    'cost_per_unit': {'type': 'number', 'description': 'Optional cost per unit (uses product cost_price if not provided)'}
                 },
                 'required': ['quantity']
             }
@@ -508,7 +581,9 @@ class ProductViewSet(viewsets.ModelViewSet):
                         'message': {'type': 'string'},
                         'old_quantity': {'type': 'integer'},
                         'new_quantity': {'type': 'integer'},
-                        'added_quantity': {'type': 'integer'}
+                        'added_quantity': {'type': 'integer'},
+                        'batch_id': {'type': 'integer'},
+                        'batch_number': {'type': 'string'}
                     }
                 }
             ),
@@ -521,11 +596,14 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
     def add_stock(self, request, pk=None):
         """
-        Add stock to a product
+        Add stock to a product with batch management
         """
         product = self.get_object()
         quantity = request.data.get('quantity')
         notes = request.data.get('notes')
+        batch_number = request.data.get('batch_number')
+        expiry_date = request.data.get('expiry_date')
+        cost_per_unit = request.data.get('cost_per_unit')
         
         if not quantity or quantity <= 0:
             return Response(
@@ -533,16 +611,47 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Parse expiry_date if provided
+        parsed_expiry_date = None
+        if expiry_date:
+            try:
+                from datetime import datetime
+                parsed_expiry_date = datetime.strptime(expiry_date, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid expiry_date format. Use YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Parse cost_per_unit if provided
+        parsed_cost_per_unit = None
+        if cost_per_unit:
+            try:
+                parsed_cost_per_unit = float(cost_per_unit)
+                if parsed_cost_per_unit < 0:
+                    return Response(
+                        {'error': 'Cost per unit must be non-negative'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'Invalid cost_per_unit format'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
         try:
             result = product.add_stock(
                 quantity=int(quantity),
                 user=request.user,
-                notes=notes
+                notes=notes,
+                batch_number=batch_number,
+                expiry_date=parsed_expiry_date,
+                cost_per_unit=parsed_cost_per_unit
             )
             
             return Response({
                 'success': True,
-                'message': f'Successfully added {quantity} units to {product.name}',
+                'message': f'Successfully added {quantity} units to {product.name} (Batch: {result["batch_number"]})',
                 **result
             })
         except ValueError as e:
@@ -700,6 +809,101 @@ class ProductViewSet(viewsets.ModelViewSet):
             'low_stock_alert': product.is_low_stock,
             'salesman_allocations': salesman_data
         })
+
+    @extend_schema(
+        summary="Get available products for salesman",
+        description="Get products with total available quantities for the authenticated salesman",
+        responses={
+            200: OpenApiResponse(
+                description="List of available products with quantities",
+                examples=[
+                    OpenApiExample(
+                        name="Available products",
+                        value=[
+                            {
+                                "product_id": 1,
+                                "product_name": "Aloevera Drink 200ml",
+                                "product_sku": "ALS001",
+                                "total_available_quantity": 1061,
+                                "base_price": 180.00,
+                                "cost_price": 150.00,
+                                "unit": "pcs"
+                            }
+                        ]
+                    )
+                ]
+            ),
+            403: OpenApiResponse(description="Only salesmen can access this endpoint")
+        },
+        tags=['Product Management']
+    )
+    @action(detail=False, methods=['get'], url_path='salesman-available-products')
+    def salesman_available_products(self, request):
+        """Get products with total available quantities for the authenticated salesman"""
+        if request.user.role != 'salesman':
+            return Response(
+                {'error': 'Only salesmen can access this endpoint'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            salesman = request.user.salesman_profile
+        except AttributeError:
+            return Response(
+                {'error': 'Salesman profile not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get products with available quantities
+        from collections import defaultdict
+        
+        # Get batch assignments for this salesman
+        assignments = BatchAssignment.objects.filter(
+            salesman=salesman,
+            status__in=['delivered', 'partial'],
+            batch__is_active=True
+        ).exclude(
+            batch__expiry_date__lt=timezone.now().date()
+        ).select_related('batch__product').annotate(
+            available_qty=F('delivered_quantity') - F('returned_quantity')
+        ).filter(available_qty__gt=0)
+        
+        # Aggregate by product
+        product_quantities = defaultdict(int)
+        product_info = {}
+        
+        for assignment in assignments:
+            product = assignment.batch.product
+            
+            # For delivered assignments, the salesman can sell what was delivered to them
+            # The batch current quantity constraint only applies when creating new assignments from the batch
+            assignment_available = assignment.available_qty
+            
+            if assignment_available > 0:
+                product_quantities[product.id] += assignment_available
+                
+                if product.id not in product_info:
+                    product_info[product.id] = {
+                        'product_id': product.id,
+                        'product_name': product.name,
+                        'product_sku': product.sku,
+                        'base_price': float(product.base_price),
+                        'cost_price': float(product.cost_price),
+                        'unit': product.unit,
+                    }
+        
+        # Build response
+        available_products = []
+        for product_id, total_qty in product_quantities.items():
+            if total_qty > 0:  # Only include products with available stock
+                product_data = product_info[product_id].copy()
+                product_data['total_available_quantity'] = total_qty
+                available_products.append(product_data)
+        
+        # Sort by product name
+        available_products.sort(key=lambda x: x['product_name'])
+        
+        return Response(available_products, status=status.HTTP_200_OK)
 
 
 @extend_schema_view(
@@ -1568,3 +1772,438 @@ class DeliveryItemViewSet(viewsets.ModelViewSet):
             )
         
         instance.delete()
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List product batches",
+        description="Get a paginated list of product batches with FIFO ordering",
+        parameters=[
+            OpenApiParameter('product', description='Filter by product ID', required=False, type=int),
+            OpenApiParameter('is_active', description='Filter by active status', required=False, type=bool),
+            OpenApiParameter('expired', description='Filter expired batches', required=False, type=bool),
+        ],
+        tags=['Batch Management']
+    ),
+    create=extend_schema(
+        summary="Create new batch",
+        description="Create a new product batch (Owner/Developer only)",
+        tags=['Batch Management']
+    ),
+    retrieve=extend_schema(
+        summary="Get batch details",
+        description="Retrieve detailed information about a specific batch",
+        tags=['Batch Management']
+    ),
+    update=extend_schema(
+        summary="Update batch",
+        description="Update batch information (Owner/Developer only)",
+        tags=['Batch Management']
+    ),
+    destroy=extend_schema(
+        summary="Delete batch",
+        description="Delete a batch (Owner/Developer only)",
+        tags=['Batch Management']
+    )
+)
+class BatchViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing product batches"""
+    queryset = Batch.objects.select_related('product').all()
+    serializer_class = BatchSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['product', 'is_active']
+    search_fields = ['batch_number', 'product__name', 'product__sku']
+    ordering_fields = ['manufacturing_date', 'expiry_date', 'created_at']
+    ordering = ['manufacturing_date', 'expiry_date']  # FIFO ordering
+    
+    def get_permissions(self):
+        """Different permissions for different actions"""
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            permission_classes = [IsOwnerOrDeveloper]
+        else:
+            permission_classes = [IsAuthenticated]
+        return [permission() for permission in permission_classes]
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filter expired batches if requested
+        expired = self.request.query_params.get('expired')
+        if expired is not None:
+            current_date = timezone.now().date()
+            if expired.lower() == 'true':
+                queryset = queryset.filter(expiry_date__lt=current_date)
+            else:
+                queryset = queryset.exclude(expiry_date__lt=current_date)
+        
+        return queryset
+    
+    def perform_create(self, serializer):
+        """Handle batch creation with logging"""
+        db_logger.info(f"Creating new batch by user: {self.request.user.username}")
+        
+        batch = serializer.save(created_by=self.request.user)
+        
+        # Create initial transaction record
+        BatchTransaction.objects.create(
+            batch=batch,
+            transaction_type='restock',
+            quantity=batch.initial_quantity,
+            balance_after=batch.current_quantity,
+            reference_type='batch_creation',
+            reference_id=batch.id,
+            notes="Initial batch creation",
+            created_by=self.request.user
+        )
+        
+        db_logger.info(f"Batch created: {batch.batch_number} for product {batch.product.name}")
+    
+    @extend_schema(
+        summary="Get batch transactions",
+        description="Get transaction history for a specific batch",
+        responses={200: BatchTransactionSerializer(many=True)},
+        tags=['Batch Management']
+    )
+    @action(detail=True, methods=['get'])
+    def transactions(self, request, pk=None):
+        """Get transaction history for a batch"""
+        batch = self.get_object()
+        transactions = batch.transactions.all()
+        serializer = BatchTransactionSerializer(transactions, many=True)
+        return Response(serializer.data)
+    
+    @extend_schema(
+        summary="Get FIFO suggestions",
+        description="Get oldest batches first for FIFO compliance",
+        parameters=[
+            OpenApiParameter('product_id', description='Product ID to get FIFO suggestions for', required=True, type=int),
+            OpenApiParameter('quantity', description='Required quantity', required=True, type=int),
+        ],
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'])
+    def fifo_suggestions(self, request):
+        """Get FIFO batch suggestions for a product"""
+        product_id = request.query_params.get('product_id')
+        required_quantity = request.query_params.get('quantity')
+        
+        if not product_id or not required_quantity:
+            return Response(
+                {'error': 'product_id and quantity parameters are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            required_quantity = int(required_quantity)
+            product = Product.objects.get(id=product_id)
+        except (ValueError, Product.DoesNotExist):
+            return Response(
+                {'error': 'Invalid product_id or quantity'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get available batches in FIFO order
+        available_batches = Batch.objects.filter(
+            product=product,
+            is_active=True,
+            current_quantity__gt=0
+        ).exclude(
+            expiry_date__lt=timezone.now().date()
+        ).order_by('manufacturing_date', 'expiry_date')
+        
+        suggestions = []
+        remaining_quantity = required_quantity
+        
+        for batch in available_batches:
+            if remaining_quantity <= 0:
+                break
+            
+            available_qty = batch.available_quantity
+            if available_qty > 0:
+                take_quantity = min(available_qty, remaining_quantity)
+                suggestions.append({
+                    'batch_id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'available_quantity': available_qty,
+                    'suggested_quantity': take_quantity,
+                    'manufacturing_date': batch.manufacturing_date,
+                    'expiry_date': batch.expiry_date,
+                    'days_until_expiry': batch.days_until_expiry
+                })
+                remaining_quantity -= take_quantity
+        
+        return Response({
+            'suggestions': suggestions,
+            'total_available': sum(s['suggested_quantity'] for s in suggestions),
+            'shortage': max(0, remaining_quantity)
+        })
+    
+    @extend_schema(
+        summary="Get salesman's available batches for invoice creation",
+        description="Get batches assigned to the authenticated salesman that are available for invoicing",
+        parameters=[
+            OpenApiParameter(
+                name='product_id',
+                description='Filter by specific product ID',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='min_quantity',
+                description='Only show batches with at least this quantity available',
+                required=False,
+                type=int
+            )
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Available batches for salesman",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        value=[
+                            {
+                                'batch_id': 1,
+                                'batch_number': 'BATCH-001',
+                                'product_id': 1,
+                                'product_name': 'Sample Product',
+                                'product_sku': 'SKU001',
+                                'available_quantity': 50,
+                                'unit_cost': '10.00',
+                                'expiry_date': '2025-12-31',
+                                'days_until_expiry': 365,
+                                'assignment_id': 1,
+                                'assignment_status': 'delivered'
+                            }
+                        ]
+                    )
+                ]
+            ),
+            403: OpenApiResponse(description="Only salesmen can access this endpoint")
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'], url_path='salesman-available-batches')
+    def salesman_available_batches(self, request):
+        """Get batches available to the authenticated salesman for invoice creation"""
+        if request.user.role != 'salesman':
+            return Response(
+                {'error': 'Only salesmen can access this endpoint'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            salesman = request.user.salesman_profile
+        except AttributeError:
+            return Response(
+                {'error': 'Salesman profile not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get query parameters
+        product_id = request.query_params.get('product_id')
+        min_quantity = request.query_params.get('min_quantity', 1)
+        
+        try:
+            min_quantity = int(min_quantity)
+        except (ValueError, TypeError):
+            min_quantity = 1
+        
+        # Get batch assignments for this salesman
+        assignments_filter = {
+            'salesman': salesman,
+            'status__in': ['delivered', 'partial']  # Only delivered or partially returned batches
+        }
+        
+        if product_id:
+            try:
+                product_id = int(product_id)
+                assignments_filter['batch__product_id'] = product_id
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'Invalid product_id'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Get assignments with available quantity
+        assignments = BatchAssignment.objects.filter(
+            **assignments_filter
+        ).select_related(
+            'batch__product'
+        ).annotate(
+            available_qty=F('delivered_quantity') - F('returned_quantity')
+        ).filter(
+            available_qty__gte=min_quantity,
+            batch__is_active=True
+        ).exclude(
+            batch__expiry_date__lt=timezone.now().date()
+        ).order_by('batch__expiry_date', 'batch__manufacturing_date')
+        
+        # Format response
+        available_batches = []
+        for assignment in assignments:
+            batch = assignment.batch
+            available_batches.append({
+                'batch_id': batch.id,
+                'batch_number': batch.batch_number,
+                'product_id': batch.product.id,
+                'product_name': batch.product.name,
+                'product_sku': batch.product.sku,
+                'available_quantity': assignment.outstanding_quantity,
+                'unit_cost': str(batch.unit_cost),
+                'expiry_date': batch.expiry_date,
+                'days_until_expiry': batch.days_until_expiry,
+                'assignment_id': assignment.id,
+                'assignment_status': assignment.status,
+                'manufacturing_date': batch.manufacturing_date
+            })
+        
+        return Response(available_batches, status=status.HTTP_200_OK)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List batch assignments",
+        description="Get list of batch assignments to salesmen",
+        parameters=[
+            OpenApiParameter('batch', description='Filter by batch ID', required=False, type=int),
+            OpenApiParameter('salesman', description='Filter by salesman ID', required=False, type=int),
+            OpenApiParameter('status', description='Filter by status', required=False, type=str),
+        ],
+        tags=['Batch Management']
+    ),
+    create=extend_schema(
+        summary="Create batch assignment",
+        description="Assign batch stock to a salesman (Owner/Developer only)",
+        tags=['Batch Management']
+    )
+)
+class BatchAssignmentViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing batch assignments to salesmen"""
+    queryset = BatchAssignment.objects.select_related('batch', 'salesman', 'created_by').all()
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['batch', 'salesman', 'status']
+    search_fields = ['batch__batch_number', 'salesman__user__first_name', 'salesman__user__last_name']
+    ordering = ['-created_at']
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreateBatchAssignmentSerializer
+        return BatchAssignmentSerializer
+    
+    def get_permissions(self):
+        """Different permissions for different actions"""
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            permission_classes = [IsOwnerOrDeveloper]
+        else:
+            permission_classes = [IsAuthenticated]
+        return [permission() for permission in permission_classes]
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # If user is salesman, only show their assignments
+        if self.request.user.role == 'salesman':
+            queryset = queryset.filter(salesman=self.request.user.salesman_profile)
+        
+        return queryset
+    
+    def perform_create(self, serializer):
+        """Handle batch assignment creation"""
+        with transaction.atomic():
+            assignment = serializer.save(created_by=self.request.user)
+            
+            db_logger.info(f"Batch assigned: {assignment.batch.batch_number} to {assignment.salesman.user.get_full_name()}")
+    
+    @extend_schema(
+        summary="Mark assignment as delivered",
+        description="Mark batch assignment as delivered to salesman",
+        tags=['Batch Management']
+    )
+    @action(detail=True, methods=['post'])
+    def mark_delivered(self, request, pk=None):
+        """Mark assignment as delivered"""
+        assignment = self.get_object()
+        
+        if assignment.status != 'pending':
+            return Response(
+                {'error': 'Only pending assignments can be marked as delivered'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            assignment.status = 'delivered'
+            assignment.delivered_quantity = assignment.quantity
+            assignment.delivery_date = timezone.now()
+            assignment.save()
+            
+            # Create transaction record
+            BatchTransaction.objects.create(
+                batch=assignment.batch,
+                transaction_type='assignment',
+                quantity=0,  # No quantity change, just status change
+                balance_after=assignment.batch.current_quantity,
+                reference_type='delivery_confirmation',
+                reference_id=assignment.id,
+                notes=f"Delivered to {assignment.salesman.user.get_full_name()}",
+                created_by=request.user
+            )
+        
+        serializer = BatchAssignmentSerializer(assignment)
+        return Response(serializer.data)
+    
+    @extend_schema(
+        summary="Process return",
+        description="Process return of batch items from salesman",
+        tags=['Batch Management']
+    )
+    @action(detail=True, methods=['post'])
+    def process_return(self, request, pk=None):
+        """Process return of batch items"""
+        assignment = self.get_object()
+        return_quantity = request.data.get('return_quantity', 0)
+        
+        if not return_quantity or return_quantity <= 0:
+            return Response(
+                {'error': 'return_quantity must be greater than 0'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        max_returnable = assignment.delivered_quantity - assignment.returned_quantity
+        if return_quantity > max_returnable:
+            return Response(
+                {'error': f'Cannot return more than {max_returnable} items'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            # Update assignment
+            assignment.returned_quantity += return_quantity
+            if assignment.returned_quantity == assignment.delivered_quantity:
+                assignment.status = 'returned'
+            else:
+                assignment.status = 'partial'
+            assignment.save()
+            
+            # Update batch quantity
+            assignment.batch.current_quantity += return_quantity
+            assignment.batch.save()
+            
+            # Create transaction record
+            BatchTransaction.objects.create(
+                batch=assignment.batch,
+                transaction_type='return',
+                quantity=return_quantity,
+                balance_after=assignment.batch.current_quantity,
+                reference_type='batch_return',
+                reference_id=assignment.id,
+                notes=f"Return from {assignment.salesman.user.get_full_name()}",
+                created_by=request.user
+            )
+        
+        serializer = BatchAssignmentSerializer(assignment)
+        return Response(serializer.data)
+
+

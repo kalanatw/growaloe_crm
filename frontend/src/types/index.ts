@@ -341,6 +341,55 @@ export interface DeliveryItem {
   notes?: string;
 }
 
+export interface BatchAssignment {
+  id: number;
+  batch_number: string;
+  product_name: string;
+  quantity: number;
+  delivered_quantity: number;
+  returned_quantity: number;
+  outstanding_quantity: number;
+  unit_cost: number;
+  manufacturing_date: string;
+  expiry_date: string;
+  status: string;
+  notes?: string;
+}
+
+// Add new batch types for invoice creation
+export interface AvailableBatch {
+  batch_id: number;
+  batch_number: string;
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  available_quantity: number;
+  unit_cost: string;
+  expiry_date: string;
+  days_until_expiry: number;
+  assignment_id: number;
+  assignment_status: string;
+  manufacturing_date: string;
+}
+
+export interface BatchInvoiceItemData {
+  product: number;
+  batch: number;
+  quantity: number;
+  unit_price: number;
+}
+
+export interface CreateBatchInvoiceData {
+  shop: number;
+  due_date?: string;
+  tax_amount?: number;
+  discount_amount?: number;
+  shop_margin?: number;
+  notes?: string;
+  terms_conditions?: string;
+  items: BatchInvoiceItemData[];
+}
+
 export interface Delivery {
   id?: number;
   delivery_number?: string;
@@ -353,6 +402,7 @@ export interface Delivery {
   notes?: string;
   settlement_notes?: string;
   items: DeliveryItem[];
+  batch_assignments?: BatchAssignment[];
   total_items?: number;
   created_by?: number;
   created_by_name?: string;
@@ -530,4 +580,42 @@ export interface SettleDeliveryRequest {
     remaining_quantity: number;
     margin_earned: number;
   }>;
+}
+
+export interface SalesmanAvailableProduct {
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  total_available_quantity: number;
+  base_price: number;
+  cost_price: number;
+  unit: string;
+}
+
+export interface SimplifiedInvoiceItemData {
+  product: number;
+  quantity: number;
+  unit_price: number;
+}
+
+export interface CreateSimplifiedInvoiceData {
+  shop: number;
+  due_date?: string;
+  tax_amount?: number;
+  discount_amount?: number;
+  shop_margin?: number;
+  notes?: string;
+  terms_conditions?: string;
+  items: SimplifiedInvoiceItemData[];
+}
+
+export interface BatchStockSummary {
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  min_stock_level: number;
+  total_quantity: number;
+  total_batches: number;
+  total_value: number;
+  low_stock_alert: boolean;
 }

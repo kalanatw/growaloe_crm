@@ -23,6 +23,13 @@ interface DeliveryFormData {
   }[];
 }
 
+interface StockSummaryItem {
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  total_quantity: number;
+}
+
 export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
   isOpen,
   onClose,
@@ -30,6 +37,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
   salesmen,
 }) => {
   const [products, setProducts] = useState<Product[]>([]);
+  const [stockSummary, setStockSummary] = useState<StockSummaryItem[]>([]);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
 
   const {
@@ -62,8 +70,13 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
   const loadProducts = async () => {
     try {
       setIsLoadingProducts(true);
-      const productsData = await productService.getProducts();
+      const [productsData, stockData] = await Promise.all([
+        productService.getProducts(),
+        productService.getProductStockSummary()
+      ]);
+      
       setProducts(productsData.results.filter(p => p.is_active));
+      setStockSummary(stockData.results || stockData);
     } catch (error) {
       console.error('Error loading products:', error);
       toast.error('Failed to load products');
@@ -105,14 +118,9 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
     onClose();
   };
 
-  const getProductName = (productId: number) => {
-    const product = products.find(p => p.id === productId);
-    return product ? `${product.name} (${product.sku})` : 'Select Product';
-  };
-
   const getAvailableStock = (productId: number) => {
-    const product = products.find(p => p.id === productId);
-    return product ? product.stock_quantity : 0;
+    const stockItem = stockSummary.find(s => s.product_id === productId);
+    return stockItem ? stockItem.total_quantity : 0;
   };
 
   if (!isOpen) return null;
@@ -239,7 +247,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                         </option>
                         {products.map((product) => (
                           <option key={product.id} value={product.id}>
-                            {product.name} ({product.sku}) - Stock: {product.stock_quantity}
+                            {product.name} ({product.sku}) - Stock: {getAvailableStock(product.id)}
                           </option>
                         ))}
                       </select>

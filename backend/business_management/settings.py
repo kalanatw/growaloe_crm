@@ -66,6 +66,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.DatabaseQueryLoggingMiddleware',
 ]
 
 ROOT_URLCONF = 'business_management.urls'
@@ -248,6 +249,10 @@ LOGGING = {
             'format': '{levelname} {message}',
             'style': '{',
         },
+        'db_query': {
+            'format': 'DB_QUERY {asctime} - Duration: {message}',
+            'style': '{',
+        },
     },
     'handlers': {
         'file': {
@@ -261,6 +266,12 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
         },
+        'db_file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'db_queries.log',
+            'formatter': 'db_query',
+        },
     },
     'root': {
         'handlers': ['console'],
@@ -269,6 +280,16 @@ LOGGING = {
     'loggers': {
         'django': {
             'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'handlers': ['db_file', 'console'],
+            'level': 'DEBUG' if DEBUG else 'INFO',
+            'propagate': False,
+        },
+        'db_logger': {
+            'handlers': ['db_file', 'console'],
             'level': 'INFO',
             'propagate': False,
         },

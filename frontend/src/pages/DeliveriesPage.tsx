@@ -395,6 +395,28 @@ const DeliveryDetailsModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
 }> = ({ delivery, isOpen, onClose }) => {
+  const [batchAssignments, setBatchAssignments] = useState<any>(null);
+  const [isLoadingBatches, setIsLoadingBatches] = useState(false);
+
+  useEffect(() => {
+    if (isOpen && delivery.id) {
+      loadBatchAssignments();
+    }
+  }, [isOpen, delivery.id]);
+
+  const loadBatchAssignments = async () => {
+    try {
+      setIsLoadingBatches(true);
+      const batchData = await deliveryService.getBatchAssignments(delivery.id!);
+      setBatchAssignments(batchData);
+    } catch (error) {
+      console.error('Error loading batch assignments:', error);
+      toast.error('Failed to load batch assignments');
+    } finally {
+      setIsLoadingBatches(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -492,6 +514,106 @@ const DeliveryDetailsModal: React.FC<{
               </table>
             </div>
           </div>
+
+          {/* Batch Assignments */}
+          {delivery.batch_assignments && delivery.batch_assignments.length > 0 && (
+            <div>
+              <h3 className="text-lg font-semibold mb-4">Batch Assignments</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Batch #
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Product
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Quantity
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Unit Cost
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Expiry Date
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {delivery.batch_assignments.map((batch, index) => (
+                      <tr key={index} className="hover:bg-gray-50">
+                        <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          {batch.batch_number}
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {batch.product_name}
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                          <div className="space-y-1">
+                            <div>Assigned: <span className="font-medium">{batch.quantity}</span></div>
+                            <div className="text-xs text-gray-500">
+                              Delivered: {batch.delivered_quantity} | 
+                              Outstanding: {batch.outstanding_quantity}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                          ${parseFloat(batch.unit_cost.toString()).toFixed(2)}
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                          <div className="space-y-1">
+                            <div>{new Date(batch.expiry_date).toLocaleDateString()}</div>
+                            <div className="text-xs text-gray-500">
+                              Mfg: {new Date(batch.manufacturing_date).toLocaleDateString()}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                            batch.status === 'assigned' ? 'bg-blue-100 text-blue-800' :
+                            batch.status === 'delivered' ? 'bg-green-100 text-green-800' :
+                            batch.status === 'partially_delivered' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-gray-100 text-gray-800'
+                          }`}>
+                            {batch.status.replace('_', ' ').toUpperCase()}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Batch Summary */}
+              <div className="mt-4 bg-gray-50 p-4 rounded-lg">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Batch Summary</h4>
+                <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-600">Total Batches:</span>
+                    <span className="ml-2 font-medium">{delivery.batch_assignments.length}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Total Assigned:</span>
+                    <span className="ml-2 font-medium">
+                      {delivery.batch_assignments.reduce((sum, batch) => sum + batch.quantity, 0)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Total Value:</span>
+                    <span className="ml-2 font-medium">
+                      ${delivery.batch_assignments.reduce((sum, batch) => 
+                        sum + (batch.quantity * parseFloat(batch.unit_cost.toString())), 0
+                      ).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex justify-end mt-6">

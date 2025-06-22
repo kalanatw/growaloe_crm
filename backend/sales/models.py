@@ -124,9 +124,10 @@ class Invoice(models.Model):
 
 
 class InvoiceItem(models.Model):
-    """Individual items in an invoice"""
+    """Individual items in an invoice with batch tracking"""
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='invoice_items')
+    batch = models.ForeignKey('products.Batch', on_delete=models.CASCADE, related_name='invoice_items', null=True, blank=True)
     quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     calculated_price = models.DecimalField(max_digits=10, decimal_places=2)  # Price after margins
@@ -140,7 +141,8 @@ class InvoiceItem(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
-        return f"{self.product.name} x {self.quantity} - {self.invoice.invoice_number}"
+        batch_info = f" (Batch: {self.batch.batch_number})" if self.batch else ""
+        return f"{self.product.name}{batch_info} x {self.quantity} - {self.invoice.invoice_number}"
     
     def save(self, *args, **kwargs):
         # Set calculated_price to unit_price (no margins applied at item level)
@@ -173,8 +175,8 @@ class InvoiceItem(models.Model):
         super().delete(*args, **kwargs)
     
     def _update_stock_quantities(self, old_quantity=0, is_new=True):
-        """Update centralized stock system for invoice items"""
-        from products.models import CentralStock, StockMovement
+        """Update batch stock system for invoice items"""
+        from products.models import CentralStock, StockMovement, BatchTransaction
         
         try:
             # Only update stock if invoice is not in draft status
@@ -186,7 +188,54 @@ class InvoiceItem(models.Model):
             if quantity_change == 0:
                 return
             
-            # Get salesman stock from central stock
+            # If batch is specified, update batch stock
+            if self.batch:
+                # Check batch availability
+                if quantity_change > 0:
+                    # Get ALL salesman's assignments for this batch and sum available quantities
+                    salesman_assignments = self.batch.assignments.filter(
+                        salesman=self.invoice.salesman,
+                        status__in=['delivered', 'partial']
+                    )
+                    
+                    if not salesman_assignments.exists():
+                        raise ValueError(f"Salesman doesn't have access to batch {self.batch.batch_number}")
+                    
+                    # Sum all available quantities across assignments
+                    total_available_qty = sum(assignment.outstanding_quantity for assignment in salesman_assignments)
+                    if total_available_qty < quantity_change:
+                        raise ValueError(f"Insufficient batch stock. Available: {total_available_qty}, Required: {quantity_change}")
+                
+                    # Update batch assignments using FIFO (reduce from assignments in order)
+                    remaining_to_reduce = quantity_change
+                    for assignment in salesman_assignments.order_by('created_at'):
+                        if remaining_to_reduce <= 0:
+                            break
+                        
+                        available_in_assignment = assignment.outstanding_quantity
+                        to_reduce = min(remaining_to_reduce, available_in_assignment)
+                        
+                        if to_reduce > 0:
+                            # For salesman sales, increase returned_quantity to reflect sold products
+                            assignment.returned_quantity += to_reduce
+                            assignment.save()
+                            remaining_to_reduce -= to_reduce
+                
+                # For salesman sales, only update assignment quantities, not batch current_quantity
+                # The batch current_quantity should only be updated for owner direct sales
+                # Create batch transaction record (but don't update batch.current_quantity for salesman sales)
+                BatchTransaction.objects.create(
+                    batch=self.batch,
+                    transaction_type='salesman_sale',
+                    quantity=-quantity_change if quantity_change > 0 else abs(quantity_change),
+                    balance_after=self.batch.current_quantity,  # Keep current balance, don't change it
+                    reference_type='invoice_item',
+                    reference_id=self.id,
+                    notes=f"Salesman sale to {self.invoice.shop.name}",
+                    created_by=self.invoice.created_by
+                )
+            
+            # Also update the original centralized stock system
             try:
                 salesman_stock = CentralStock.objects.get(
                     product=self.product,
@@ -194,34 +243,35 @@ class InvoiceItem(models.Model):
                     location_id=self.invoice.salesman.id
                 )
                 
-                # Check if salesman has enough stock
-                if quantity_change > 0 and salesman_stock.quantity < quantity_change:
+                # Check if salesman has enough stock (if not using batch system)
+                if not self.batch and quantity_change > 0 and salesman_stock.quantity < quantity_change:
                     raise ValueError(f"Insufficient stock for {self.product.name}. Available: {salesman_stock.quantity}, Required: {quantity_change}")
                 
                 # Update salesman stock
-                salesman_stock.quantity -= quantity_change
-                salesman_stock.quantity = max(0, salesman_stock.quantity)
+                if quantity_change > 0:
+                    salesman_stock.quantity -= quantity_change
+                else:
+                    salesman_stock.quantity += abs(quantity_change)
+                
                 salesman_stock.save()
                 
-                # Create stock movement record for salesman
+                # Create stock movement record
                 StockMovement.objects.create(
                     product=self.product,
-                    movement_type='sale',
-                    quantity=-quantity_change,  # Negative for outward movement
-                    reference_id=self.invoice.invoice_number,
                     salesman=self.invoice.salesman,
-                    notes=f"Invoice sale: {self.invoice.invoice_number}",
+                    movement_type='sale',
+                    quantity=-quantity_change if quantity_change > 0 else abs(quantity_change),
+                    notes=f"Invoice {self.invoice.invoice_number} - {self.invoice.shop.name}",
+                    reference_id=self.invoice.id,
                     created_by=self.invoice.created_by
                 )
                 
             except CentralStock.DoesNotExist:
-                raise ValueError(f"No stock allocation found for {self.product.name} for salesman {self.invoice.salesman.name}")
-            
+                if not self.batch:
+                    raise ValueError(f"No stock record found for {self.product.name} with salesman {self.invoice.salesman.user.get_full_name()}")
+                
         except Exception as e:
-            # Log the error but don't break the save process
-            print(f"Error updating stock quantities: {e}")
-            # In production, you might want to raise the exception to prevent the save
-            raise e
+            raise ValueError(f"Stock update failed: {str(e)}")
     
     def _restore_stock_quantities(self):
         """Restore stock quantities when invoice item is deleted"""
@@ -265,7 +315,7 @@ class InvoiceItem(models.Model):
     
     class Meta:
         db_table = 'invoice_items'
-        unique_together = ['invoice', 'product']
+        unique_together = ['invoice', 'product', 'batch']
 
 
 class Transaction(models.Model):

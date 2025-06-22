@@ -100,18 +100,48 @@ class Product(models.Model):
             'profit_percentage': float((profit / selling_price) * 100) if selling_price > 0 else 0
         }
     
-    def add_stock(self, quantity, user=None, notes=None):
-        """Add stock to owner inventory"""
+    def add_stock(self, quantity, user=None, notes=None, batch_number=None, expiry_date=None, cost_per_unit=None):
+        """Add stock to owner inventory using batch management"""
         if quantity <= 0:
             raise ValueError("Stock quantity must be positive")
         
-        # Add to owner stock in central stock
-        central_stock, created = CentralStock.objects.get_or_create(
+        # Create a new batch for the restocked items
+        batch = Batch.objects.create(
+            product=self,
+            batch_number=batch_number or f"BATCH-{self.id}-{timezone.now().strftime('%Y%m%d-%H%M%S')}",
+            manufacturing_date=timezone.now().date(),
+            initial_quantity=quantity,
+            current_quantity=quantity,
+            expiry_date=expiry_date,
+            unit_cost=cost_per_unit or self.cost_price,
+            notes=notes,
+            created_by=user
+        )
+        
+        # Create batch transaction record
+        BatchTransaction.objects.create(
+            batch=batch,
+            transaction_type='restock',
+            quantity=quantity,
+            balance_after=quantity,  # For new batch, balance after = initial quantity
+            notes=notes or f"Initial stock added: {quantity} units",
+            created_by=user
+        )
+        
+        # Update central stock for backward compatibility
+        central_stock = CentralStock.objects.filter(
             product=self,
             location_type='owner',
-            location_id=None,
-            defaults={'quantity': 0}
-        )
+            location_id=None
+        ).first()
+        
+        if not central_stock:
+            central_stock = CentralStock.objects.create(
+                product=self,
+                location_type='owner',
+                location_id=None,
+                quantity=0
+            )
         
         old_quantity = central_stock.quantity
         central_stock.quantity += quantity
@@ -122,12 +152,14 @@ class Product(models.Model):
             product=self,
             movement_type='purchase',
             quantity=quantity,
-            notes=notes or f"Stock added: {quantity} units",
+            notes=notes or f"Stock added: {quantity} units (Batch: {batch.batch_number})",
             created_by=user
         )
         
         return {
             'old_quantity': old_quantity,
+            'batch_id': batch.id,
+            'batch_number': batch.batch_number,
             'new_quantity': central_stock.quantity,
             'added_quantity': quantity
         }
@@ -466,12 +498,8 @@ class DeliveryItem(models.Model):
         
         super().save(*args, **kwargs)
         
-        # Transfer stock immediately when delivery item is created/updated
-        if is_new:
-            self._transfer_stock_to_salesman()
-        elif old_quantity != self.quantity:
-            # Adjust stock for quantity changes
-            self._adjust_stock_for_change(old_quantity)
+        # Stock transfer is now handled by batch assignments in the serializer
+        # No need to transfer stock here as it's done via FIFO batch assignment
     
     def delete(self, *args, **kwargs):
         # Return stock to owner when item is deleted
@@ -664,3 +692,119 @@ class DeliveryItem(models.Model):
     class Meta:
         db_table = 'delivery_items'
         unique_together = ['delivery', 'product']
+
+
+class Batch(models.Model):
+    """Product batch model for FIFO inventory management"""
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='batches')
+    batch_number = models.CharField(max_length=100, help_text="User-defined batch number")
+    manufacturing_date = models.DateField(help_text="Manufacturing or received date")
+    expiry_date = models.DateField(null=True, blank=True, help_text="Expiry date for FIFO")
+    initial_quantity = models.PositiveIntegerField(help_text="Initial quantity in this batch")
+    current_quantity = models.PositiveIntegerField(help_text="Current available quantity")
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Cost per unit for this batch")
+    notes = models.TextField(blank=True, null=True, help_text="Additional notes about this batch")
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_batches')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'product_batches'
+        unique_together = ['product', 'batch_number']
+        ordering = ['manufacturing_date', 'expiry_date']  # FIFO ordering
+        
+    def __str__(self):
+        return f"{self.product.name} - Batch {self.batch_number}"
+    
+    @property
+    def is_expired(self):
+        """Check if batch is expired"""
+        if self.expiry_date:
+            return timezone.now().date() > self.expiry_date
+        return False
+    
+    @property
+    def days_until_expiry(self):
+        """Calculate days until expiry"""
+        if self.expiry_date:
+            delta = self.expiry_date - timezone.now().date()
+            return delta.days
+        return None
+    
+    @property
+    def allocated_quantity(self):
+        """Get quantity allocated to salesmen"""
+        return BatchAssignment.objects.filter(
+            batch=self,
+            status__in=['pending', 'delivered']
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
+    
+    @property
+    def available_quantity(self):
+        """Get available quantity (current - allocated)"""
+        return self.current_quantity - self.allocated_quantity
+
+
+class BatchTransaction(models.Model):
+    """Track all batch stock movements for audit trail"""
+    TRANSACTION_TYPES = (
+        ('restock', 'Restock'),
+        ('assignment', 'Assignment to Salesman'),
+        ('sale', 'Sale'),
+        ('return', 'Return from Salesman'),
+        ('adjustment', 'Stock Adjustment'),
+        ('expired', 'Expired Stock Removal'),
+    )
+    
+    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='transactions')
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    quantity = models.IntegerField(help_text="Positive for stock in, negative for stock out")
+    balance_after = models.PositiveIntegerField(help_text="Stock balance after this transaction")
+    reference_type = models.CharField(max_length=50, blank=True, help_text="Type of reference (delivery, invoice, etc.)")
+    reference_id = models.PositiveIntegerField(null=True, blank=True, help_text="ID of related record")
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='batch_transactions')
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'batch_transactions'
+        ordering = ['-created_at']
+        
+    def __str__(self):
+        return f"{self.batch} - {self.transaction_type} ({self.quantity})"
+
+
+class BatchAssignment(models.Model):
+    """Track batch assignments to salesmen"""
+    ASSIGNMENT_STATUS = (
+        ('pending', 'Pending'),
+        ('delivered', 'Delivered'),
+        ('partial', 'Partially Returned'),
+        ('returned', 'Fully Returned'),
+        ('cancelled', 'Cancelled'),
+    )
+    
+    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='assignments')
+    salesman = models.ForeignKey('accounts.Salesman', on_delete=models.CASCADE, related_name='batch_assignments')
+    quantity = models.PositiveIntegerField(help_text="Quantity assigned")
+    delivered_quantity = models.PositiveIntegerField(default=0, help_text="Quantity actually delivered")
+    returned_quantity = models.PositiveIntegerField(default=0, help_text="Quantity returned")
+    status = models.CharField(max_length=20, choices=ASSIGNMENT_STATUS, default='pending')
+    delivery_date = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_assignments')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'batch_assignments'
+        ordering = ['-created_at']
+        
+    def __str__(self):
+        return f"{self.batch} -> {self.salesman.user.get_full_name()} ({self.quantity})"
+    
+    @property
+    def outstanding_quantity(self):
+        """Get quantity still with salesman (delivered - returned)"""
+        return self.delivered_quantity - self.returned_quantity

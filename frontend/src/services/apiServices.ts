@@ -18,6 +18,10 @@ import {
   TopProduct,
   AnalyticsData,
   CompanySettings,
+  AvailableBatch,
+  CreateBatchInvoiceData,
+  SalesmanAvailableProduct,
+  CreateSimplifiedInvoiceData,
   UpdateCompanySettingsData,
   Delivery,
   CreateDeliveryData,
@@ -91,7 +95,9 @@ export const productService = {
     return apiClient.get('/products/products/stock_summary/');
   },
 
+  // Legacy methods for backward compatibility - will use batch data under the hood
   getSalesmanStock: async (): Promise<{ results: SalesmanStock[] }> => {
+    // This method is deprecated but kept for backward compatibility
     return apiClient.get<{ results: SalesmanStock[] }>('/products/salesman-stock/');
   },
 
@@ -102,6 +108,7 @@ export const productService = {
       total_stock_value: number;
     };
   }> => {
+    // This method is deprecated but kept for backward compatibility
     return apiClient.get('/products/salesman-stock/my_stock/');
   },
 
@@ -112,6 +119,7 @@ export const productService = {
       total_available_quantity: number;
     };
   }> => {
+    // This method is deprecated but kept for backward compatibility
     return apiClient.get('/products/salesman-stock/all_available_stock/');
   },
 
@@ -129,6 +137,17 @@ export const productService = {
   getCategories: async (): Promise<{ results: Category[] }> => {
     return apiClient.get<{ results: Category[] }>('/products/categories/');
   },
+
+  // Add new method for fetching available products with total quantities for salesmen
+  getSalesmanAvailableProducts: async (): Promise<SalesmanAvailableProduct[]> => {
+    return apiClient.get<SalesmanAvailableProduct[]>('/products/products/salesman-available-products/');
+  },
+
+  // Add new method for fetching available batches for salesmen
+  getSalesmanAvailableBatches: async (salesmanId?: number): Promise<AvailableBatch[]> => {
+    const params = salesmanId ? `?salesman_id=${salesmanId}` : '';
+    return apiClient.get<AvailableBatch[]>(`/products/batches/salesman-available-batches/${params}`);
+  },
 };
 
 export const invoiceService = {
@@ -141,6 +160,15 @@ export const invoiceService = {
   },
 
   createInvoice: async (data: CreateInvoiceData): Promise<Invoice> => {
+    return apiClient.post<Invoice>('/sales/invoices/', data);
+  },
+
+  // Add batch-aware invoice creation
+  createBatchInvoice: async (data: CreateBatchInvoiceData): Promise<Invoice> => {
+    return apiClient.post<Invoice>('/sales/invoices/', data);
+  },
+
+  createSimplifiedInvoice: async (data: CreateSimplifiedInvoiceData): Promise<Invoice> => {
     return apiClient.post<Invoice>('/sales/invoices/', data);
   },
 
@@ -397,5 +425,32 @@ export const deliveryService = {
     message: string;
   }> => {
     return apiClient.post(`/products/deliveries/${id}/settle/`, data);
+  },
+
+  getBatchAssignments: async (id: number): Promise<{
+    delivery_id: number;
+    delivery_number: string;
+    salesman_name: string;
+    delivery_date: string;
+    status: string;
+    items: Array<{
+      delivery_item_id: number;
+      product_id: number;
+      product_name: string;
+      product_sku: string;
+      total_quantity: number;
+      batch_assignments: Array<{
+        batch_id: number;
+        batch_number: string;
+        quantity: number;
+        delivered_quantity: number;
+        expiry_date: string | null;
+        manufacturing_date: string | null;
+        unit_cost: number;
+        status: string;
+      }>;
+    }>;
+  }> => {
+    return apiClient.get(`/products/deliveries/${id}/batch_assignments/`);
   },
 };
