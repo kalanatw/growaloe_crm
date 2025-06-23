@@ -9,6 +9,8 @@ router.register(r'salesman-stock', views.SalesmanStockViewSet)
 router.register(r'stock-movements', views.StockMovementViewSet)
 router.register(r'deliveries', views.DeliveryViewSet)
 router.register(r'delivery-items', views.DeliveryItemViewSet)
+router.register(r'batches', views.BatchViewSet)
+router.register(r'batch-assignments', views.BatchAssignmentViewSet)
 
 urlpatterns = [
     # Router URLs - all product endpoints are handled by ViewSets

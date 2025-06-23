@@ -10,13 +10,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 
-from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment
+from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment, Commission
 from .serializers import (
     InvoiceSerializer, InvoiceCreateSerializer, InvoiceItemSerializer,
     TransactionSerializer, ReturnSerializer, InvoiceSummarySerializer,
     SalesPerformanceSerializer, InvoiceSettlementSerializer, 
     SettlementPaymentSerializer, MultiPaymentSettlementSerializer,
-    BatchInvoiceCreateSerializer, AutoBatchInvoiceCreateSerializer
+    BatchInvoiceCreateSerializer, AutoBatchInvoiceCreateSerializer,
+    CommissionSerializer, EnhancedReturnSerializer, EnhancedSettlementSerializer, UnsettledInvoicesSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 from products.models import CentralStock, StockMovement
@@ -444,8 +445,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         outstanding_amount = Decimal('0')
         
         for invoice in queryset:
-            paid_amount += invoice.get_paid_amount()
-            outstanding_amount += invoice.get_outstanding_balance()
+            paid_amount += invoice.paid_amount
+            outstanding_amount += invoice.balance_due
         
         overdue_invoices = queryset.filter(
             due_date__lt=timezone.now().date(),
@@ -1206,3 +1207,332 @@ class TransactionViewSet(viewsets.ModelViewSet):
             return Invoice.objects.filter(shop=user.shop_profile)
         else:
             return Invoice.objects.all()
+    
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List salesman commissions",
+        description="Get a paginated list of salesman commissions",
+        parameters=[
+            OpenApiParameter(
+                name='status',
+                description='Filter by commission status',
+                required=False,
+                type=str,
+                enum=['PENDING', 'PAID']
+            ),
+            OpenApiParameter(
+                name='salesman',
+                description='Filter by salesman ID',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='invoice',
+                description='Filter by invoice ID',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='search',
+                description='Search by invoice number or salesman name',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='ordering',
+                description='Order results by field (prefix with - for descending)',
+                required=False,
+                type=str,
+                enum=['created_at', '-created_at', 'commission_amount', '-commission_amount', 'paid_date', '-paid_date']
+            )
+        ],
+        responses={200: CommissionSerializer(many=True)},
+        tags=['Sales Management']
+    ),
+    create=extend_schema(
+        summary="Create commission",
+        description="Create a new commission record",
+        request=CommissionSerializer,
+        responses={
+            201: CommissionSerializer,
+            400: OpenApiResponse(description="Invalid data provided")
+        },
+        tags=['Sales Management']
+    ),
+    retrieve=extend_schema(
+        summary="Get commission details",
+        description="Retrieve detailed information about a specific commission",
+        responses={
+            200: CommissionSerializer,
+            404: OpenApiResponse(description="Commission not found")
+        },
+        tags=['Sales Management']
+    ),
+    update=extend_schema(
+        summary="Update commission",
+        description="Update commission information",
+        request=CommissionSerializer,
+        responses={
+            200: CommissionSerializer,
+            400: OpenApiResponse(description="Invalid data provided"),
+            404: OpenApiResponse(description="Commission not found")
+        },
+        tags=['Sales Management']
+    ),
+    partial_update=extend_schema(
+        summary="Partially update commission",
+        description="Partially update commission information",
+        request=CommissionSerializer,
+        responses={
+            200: CommissionSerializer,
+            400: OpenApiResponse(description="Invalid data provided"),
+            404: OpenApiResponse(description="Commission not found")
+        },
+        tags=['Sales Management']
+    ),
+    destroy=extend_schema(
+        summary="Delete commission",
+        description="Delete a commission record",
+        responses={
+            204: OpenApiResponse(description="Commission deleted successfully"),
+            404: OpenApiResponse(description="Commission not found")
+        },
+        tags=['Sales Management']
+    )
+)
+class CommissionViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing salesman commissions"""
+    queryset = Commission.objects.all()
+    serializer_class = CommissionSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['status', 'salesman', 'invoice']
+    search_fields = ['invoice__invoice_number', 'salesman__name']
+    ordering_fields = ['created_at', 'commission_amount', 'paid_date']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        """Filter commissions based on user role"""
+        user = self.request.user
+        
+        if user.role == 'SALESMAN':
+            # Salesmen can only see their own commissions
+            try:
+                salesman = user.salesman_profile
+                return Commission.objects.filter(salesman=salesman)
+            except:
+                return Commission.objects.none()
+        else:
+            # Owners can see all commissions
+            return Commission.objects.all()
+    
+    @action(detail=False, methods=['get'])
+    def dashboard_data(self, request):
+        """Get commission dashboard data"""
+        try:
+            user = request.user
+            queryset = self.get_queryset()
+            
+            # Calculate totals
+            pending_total = queryset.filter(status='pending').aggregate(
+                total=Sum('commission_amount')
+            )['total'] or Decimal('0.00')
+            
+            paid_total = queryset.filter(status='paid').aggregate(
+                total=Sum('commission_amount')
+            )['total'] or Decimal('0.00')
+            
+            # Get per-salesman breakdown (only for owners)
+            salesman_data = []
+            if user.role != 'SALESMAN':
+                from accounts.models import Salesman
+                salesmen = Salesman.objects.all()
+                
+                for salesman in salesmen:
+                    salesman_commissions = Commission.objects.filter(salesman=salesman)
+                    salesman_pending = salesman_commissions.filter(status='pending').aggregate(
+                        total=Sum('commission_amount')
+                    )['total'] or Decimal('0.00')
+                    
+                    salesman_data.append({
+                        'salesman_id': salesman.id,
+                        'salesman_name': salesman.name,
+                        'pending_commission': salesman_pending,
+                        'total_invoices': salesman_commissions.count()
+                    })
+            
+            # Get recent commissions
+            recent_commissions = queryset.order_by('-created_at')[:10]
+            
+            dashboard_data = {
+                'total_pending_commissions': pending_total,
+                'total_paid_commissions': paid_total,
+                'salesman_commissions': salesman_data,
+                'recent_commissions': CommissionSerializer(recent_commissions, many=True).data
+            }
+            
+            return Response(dashboard_data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get commission dashboard data: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def mark_paid(self, request, pk=None):
+        """Mark a commission as paid"""
+        try:
+            commission = self.get_object()
+            payment_reference = request.data.get('payment_reference', '')
+            
+            commission.status = 'paid'
+            commission.paid_date = timezone.now()
+            commission.paid_by = request.user
+            commission.payment_reference = payment_reference
+            commission.save()
+            
+            return Response({
+                'message': 'Commission marked as paid successfully',
+                'commission': CommissionSerializer(commission).data
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to mark commission as paid: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class EnhancedReturnViewSet(viewsets.ModelViewSet):
+    """Enhanced ViewSet for managing product returns with batch support"""
+    queryset = Return.objects.all()
+    serializer_class = EnhancedReturnSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['approved', 'reason', 'batch', 'product']
+    search_fields = ['return_number', 'batch__batch_number', 'product__name']
+    ordering_fields = ['created_at', 'return_amount']
+    ordering = ['-created_at']
+    
+    @action(detail=False, methods=['get'])
+    def batch_search(self, request):
+        """Search batches for return autocomplete"""
+        try:
+            query = request.query_params.get('q', '').strip()
+            
+            if len(query) < 2:
+                return Response([])
+            
+            from products.models import Batch
+            
+            # Search batches by batch number or product name
+            batches = Batch.objects.filter(
+                Q(batch_number__icontains=query) |
+                Q(product__name__icontains=query)
+            ).filter(
+                is_active=True,
+                current_quantity__gt=0
+            ).select_related('product').order_by('-created_at')[:10]
+            
+            batch_data = []
+            for batch in batches:
+                batch_data.append({
+                    'id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'product_name': batch.product.name,
+                    'current_quantity': batch.current_quantity,
+                    'expiry_date': batch.expiry_date,
+                    'manufacturing_date': batch.manufacturing_date
+                })
+            
+            return Response(batch_data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to search batches: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def batch_return_summary(self, request):
+        """Get return summary by batch"""
+        try:
+            from products.models import Batch
+            
+            # Get batches with return counts
+            batches_with_returns = Batch.objects.annotate(
+                total_returns=Sum('returns__quantity', filter=Q(returns__approved=True)),
+                return_count=Count('returns', filter=Q(returns__approved=True))
+            ).filter(
+                Q(total_returns__gt=0) | Q(return_count__gt=0)
+            ).select_related('product').order_by('-total_returns')
+            
+            batch_data = []
+            for batch in batches_with_returns:
+                batch_data.append({
+                    'batch_id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'product_name': batch.product.name,
+                    'original_quantity': batch.initial_quantity,
+                    'current_quantity': batch.current_quantity,
+                    'total_returns': batch.total_returns or 0,
+                    'return_transactions': batch.return_count or 0,
+                    'expiry_date': batch.expiry_date
+                })
+            
+            return Response(batch_data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get batch return summary: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class EnhancedSettlementViewSet(viewsets.ModelViewSet):
+    """Enhanced ViewSet for invoice settlements with bill-to-bill support"""
+    queryset = InvoiceSettlement.objects.all()
+    serializer_class = EnhancedSettlementSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['invoice__shop', 'invoice__salesman']
+    search_fields = ['invoice__invoice_number', 'invoice__shop__name']
+    ordering_fields = ['settlement_date', 'total_amount']
+    ordering = ['-settlement_date']
+    
+    @action(detail=False, methods=['get'])
+    def unsettled_invoices(self, request):
+        """Get unsettled invoices for a specific shop"""
+        try:
+            shop_id = request.query_params.get('shop_id')
+            
+            if not shop_id:
+                return Response(
+                    {'error': 'shop_id parameter is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get unsettled invoices for the shop
+            unsettled_invoices = Invoice.objects.filter(
+                shop_id=shop_id,
+                balance_due__gt=0
+            ).order_by('-invoice_date')
+            
+            # Calculate total unsettled amount
+            total_unsettled = sum(invoice.balance_due for invoice in unsettled_invoices)
+            
+            serialized_invoices = UnsettledInvoicesSerializer(unsettled_invoices, many=True).data
+            
+            return Response({
+                'invoices': serialized_invoices,
+                'total_unsettled_amount': total_unsettled,
+                'invoice_count': len(serialized_invoices)
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get unsettled invoices: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

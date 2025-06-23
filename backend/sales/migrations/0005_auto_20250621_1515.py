@@ -11,7 +11,15 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunSQL(
-            "ALTER TABLE invoice_items DROP COLUMN allocated_batches;",
+            """
+            DO $$ 
+            BEGIN 
+                IF EXISTS (SELECT column_name FROM information_schema.columns 
+                          WHERE table_name='invoice_items' AND column_name='allocated_batches') THEN
+                    ALTER TABLE invoice_items DROP COLUMN allocated_batches;
+                END IF;
+            END $$;
+            """,
             reverse_sql="ALTER TABLE invoice_items ADD COLUMN allocated_batches jsonb NOT NULL DEFAULT '[]';"
         ),
     ]

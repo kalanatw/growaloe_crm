@@ -1,8 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.db import models
 from decimal import Decimal
-from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment
+from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment, Commission
 from products.models import Product, CentralStock
 
 User = get_user_model()
@@ -782,4 +783,142 @@ class AutoBatchInvoiceCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 f"Could not allocate {remaining_quantity} units of {product.name}. Insufficient batch stock available: {total_quantity - remaining_quantity} allocated."
             )
+
+
+class CommissionSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    salesman_name = serializers.CharField(source='salesman.name', read_only=True)
+    shop_name = serializers.CharField(source='invoice.shop.name', read_only=True)
+    commission_percentage = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Commission
+        fields = [
+            'id', 'invoice', 'invoice_number', 'salesman', 'salesman_name', 
+            'shop_name', 'commission_rate', 'commission_percentage', 
+            'invoice_amount', 'commission_amount', 'status', 'paid_date', 
+            'paid_by', 'payment_reference', 'notes', 'created_at'
+        ]
+        read_only_fields = ['id', 'invoice_number', 'salesman_name', 'shop_name', 
+                          'commission_percentage', 'invoice_amount', 'commission_amount', 'created_at']
+    
+    def get_commission_percentage(self, obj):
+        return f"{obj.commission_rate}%"
+
+
+class EnhancedReturnSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    batch_expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
+    invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True)
+    
+    class Meta:
+        model = Return
+        fields = [
+            'id', 'return_number', 'original_invoice', 'invoice_number',
+            'product', 'product_name', 'batch', 'batch_number', 'batch_expiry_date',
+            'quantity', 'reason', 'return_amount', 'approved', 'approved_by',
+            'notes', 'created_by', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'return_number', 'product_name', 'batch_number', 
+                          'batch_expiry_date', 'invoice_number', 'created_at', 'updated_at']
+    
+    def validate(self, data):
+        batch = data.get('batch')
+        quantity = data.get('quantity', 0)
+        
+        if batch and quantity > 0:
+            # Check if there are enough sold items from this batch to return
+            # This would involve checking invoice items that used this batch
+            sold_from_batch = InvoiceItem.objects.filter(
+                batch=batch,
+                invoice__status__in=['paid', 'partial']
+            ).aggregate(total_sold=models.Sum('quantity'))['total_sold'] or 0
+            
+            already_returned = Return.objects.filter(
+                batch=batch,
+                approved=True
+            ).aggregate(total_returned=models.Sum('quantity'))['total_returned'] or 0
+            
+            available_for_return = sold_from_batch - already_returned
+            
+            if quantity > available_for_return:
+                raise serializers.ValidationError(
+                    f"Cannot return {quantity} units. Only {available_for_return} units available for return from batch {batch.batch_number}"
+                )
+        
+        return data
+
+
+class BatchSearchSerializer(serializers.Serializer):
+    """Serializer for batch search autocomplete"""
+    id = serializers.IntegerField()
+    batch_number = serializers.CharField()
+    product_name = serializers.CharField()
+    current_quantity = serializers.IntegerField()
+    expiry_date = serializers.DateField()
+    manufacturing_date = serializers.DateField()
+
+
+class UnsettledInvoicesSerializer(serializers.ModelSerializer):
+    """Serializer for showing unsettled invoices for bill-to-bill settlement"""
+    outstanding_amount = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Invoice
+        fields = [
+            'id', 'invoice_number', 'invoice_date', 'net_total', 
+            'paid_amount', 'balance_due', 'outstanding_amount'
+        ]
+    
+    def get_outstanding_amount(self, obj):
+        return obj.balance_due
+
+
+class EnhancedSettlementSerializer(serializers.ModelSerializer):
+    """Enhanced settlement serializer with bill-to-bill support"""
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    shop_name = serializers.CharField(source='invoice.shop.name', read_only=True)
+    payments = serializers.SerializerMethodField()
+    unsettled_invoices_total = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = InvoiceSettlement
+        fields = [
+            'id', 'invoice', 'invoice_number', 'shop_name', 'settlement_date',
+            'total_amount', 'unsettled_invoices_total', 'payments', 'notes', 'created_by'
+        ]
+        read_only_fields = ['id', 'invoice_number', 'shop_name', 'unsettled_invoices_total', 'payments']
+    
+    def get_payments(self, obj):
+        payments = SettlementPayment.objects.filter(settlement=obj)
+        return SettlementPaymentSerializer(payments, many=True).data
+    
+    def get_unsettled_invoices_total(self, obj):
+        """Get total amount of unsettled invoices for the same shop"""
+        unsettled_invoices = Invoice.objects.filter(
+            shop=obj.invoice.shop,
+            balance_due__gt=0
+        ).exclude(id=obj.invoice.id)
+        
+        return sum(invoice.balance_due for invoice in unsettled_invoices)
+
+
+class SettlementPaymentSerializer(serializers.ModelSerializer):
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    
+    class Meta:
+        model = SettlementPayment
+        fields = [
+            'id', 'payment_method', 'payment_method_display', 'amount',
+            'reference_number', 'bank_name', 'cheque_date', 'notes'
+        ]
+
+
+class CommissionDashboardSerializer(serializers.Serializer):
+    """Serializer for commission dashboard data"""
+    total_pending_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_paid_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
+    salesman_commissions = serializers.ListField()
+    recent_commissions = CommissionSerializer(many=True)
 

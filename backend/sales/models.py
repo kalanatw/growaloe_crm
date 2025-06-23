@@ -385,6 +385,7 @@ class Return(models.Model):
     return_number = models.CharField(max_length=100, unique=True)
     original_invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='returns')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    batch = models.ForeignKey('products.Batch', on_delete=models.CASCADE, related_name='returns', null=True, blank=True)
     quantity = models.PositiveIntegerField()
     reason = models.CharField(max_length=20, choices=RETURN_REASONS)
     return_amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -403,7 +404,33 @@ class Return(models.Model):
     def save(self, *args, **kwargs):
         if not self.return_number:
             self.return_number = self.generate_return_number()
+        
+        is_new = self.pk is None
         super().save(*args, **kwargs)
+        
+        # Update batch stock when return is approved
+        if self.approved and is_new:
+            self._update_batch_stock()
+    
+    def _update_batch_stock(self):
+        """Update batch stock when return is processed"""
+        if self.approved and self.batch:
+            # Add returned quantity back to batch stock
+            self.batch.current_quantity += self.quantity
+            self.batch.save()
+            
+            # Create batch transaction record
+            from products.models import BatchTransaction
+            BatchTransaction.objects.create(
+                batch=self.batch,
+                transaction_type='return',
+                quantity=self.quantity,
+                balance_after=self.batch.current_quantity,
+                reference_type='return',
+                reference_id=self.id,
+                notes=f"Return: {self.return_number} - {self.reason}",
+                created_by=self.created_by
+            )
     
     def generate_return_number(self):
         """Generate unique return number"""
@@ -496,3 +523,46 @@ class SettlementPayment(models.Model):
     class Meta:
         db_table = 'settlement_payments'
         ordering = ['created_at']
+
+
+class Commission(models.Model):
+    """Commission tracking for salesmen"""
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    invoice = models.OneToOneField(Invoice, on_delete=models.CASCADE, related_name='commission')
+    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='commissions')
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=2, default=10.00)  # 10% default
+    invoice_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    commission_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Payment tracking
+    paid_date = models.DateTimeField(null=True, blank=True)
+    paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='paid_commissions')
+    payment_reference = models.CharField(max_length=100, blank=True, null=True)
+    
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Commission for {self.salesman.name} - {self.invoice.invoice_number} ({self.commission_amount})"
+    
+    def save(self, *args, **kwargs):
+        # Calculate commission amount
+        self.invoice_amount = self.invoice.net_total
+        self.commission_amount = (self.invoice_amount * self.commission_rate) / Decimal('100')
+        super().save(*args, **kwargs)
+    
+    class Meta:
+        db_table = 'commissions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['salesman', 'status']),
+            models.Index(fields=['invoice', 'status']),
+        ]
