@@ -80,6 +80,7 @@ export const CreateSalesmanPage: React.FC = () => {
           first_name: data.first_name,
           last_name: data.last_name,
           password: data.password,
+          confirm_password: data.confirmPassword,
           phone: data.phone || '',
           address: data.address || '',
           role: USER_ROLES.SALESMAN,

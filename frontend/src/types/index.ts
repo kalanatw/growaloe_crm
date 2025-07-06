@@ -200,6 +200,7 @@ export interface CreateUserData {
   first_name: string;
   last_name: string;
   password: string;
+  confirm_password: string;
   phone?: string;
   address?: string;
   role: string;
