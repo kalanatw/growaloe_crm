@@ -17,7 +17,7 @@ from .serializers import (
     CategorySerializer, ProductSerializer, ProductCreateSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
     SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
-    DeliveryItemSerializer, DeliverySettlementSerializer, SettleDeliverySerializer,
+    DeliveryItemSerializer, DeliverySettlementSerializer,
     BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer
 )
 from sales.serializers import BatchRecallSerializer

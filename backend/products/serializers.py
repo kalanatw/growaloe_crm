@@ -4,7 +4,7 @@ from django.db.models import Sum
 from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem
 from accounts.models import Salesman
 
 User = get_user_model()
@@ -314,34 +314,95 @@ class CreateDeliverySerializer(serializers.ModelSerializer):
         return delivery
 
 
-class DeliverySettlementItemSerializer(serializers.Serializer):
-    """Serializer for individual items in delivery settlement"""
-    delivery_item_id = serializers.IntegerField()
-    product_id = serializers.IntegerField(read_only=True)
-    product_name = serializers.CharField(read_only=True)
-    delivered_quantity = serializers.IntegerField(read_only=True)
-    sold_quantity = serializers.IntegerField(read_only=True)
-    remaining_quantity = serializers.IntegerField()
-    margin_earned = serializers.DecimalField(max_digits=10, decimal_places=2)
+class DeliverySettlementItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    outstanding_quantity = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = DeliverySettlementItem
+        fields = [
+            'id', 'product', 'product_name', 'product_sku',
+            'delivered_quantity', 'sold_quantity', 'returned_quantity', 'outstanding_quantity',
+            'unit_price', 'delivered_value', 'sold_value', 'returned_value',
+            'margin_per_unit', 'total_margin_earned', 'created_at'
+        ]
+        read_only_fields = ['id', 'delivered_value', 'sold_value', 'returned_value', 'total_margin_earned', 'created_at']
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_outstanding_quantity(self, obj):
+        return obj.delivered_quantity - obj.sold_quantity - obj.returned_quantity
 
 
-class DeliverySettlementSerializer(serializers.Serializer):
-    """Serializer for delivery settlement data"""
-    delivery_id = serializers.IntegerField(read_only=True)
-    delivery_number = serializers.CharField(read_only=True)
-    salesman_name = serializers.CharField(read_only=True)
-    delivery_date = serializers.DateField(read_only=True)
+class DeliverySettlementSerializer(serializers.ModelSerializer):
+    salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
+    settled_by_name = serializers.CharField(source='settled_by.get_full_name', read_only=True)
+    items = DeliverySettlementItemSerializer(many=True, read_only=True)
+    efficiency_rate = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = DeliverySettlement
+        fields = [
+            'id', 'salesman', 'salesman_name', 'settlement_date', 'settlement_number',
+            'total_delivered_value', 'total_sold_value', 'total_returned_value', 'total_margin_earned',
+            'total_delivered_items', 'total_sold_items', 'total_returned_items',
+            'status', 'settlement_notes', 'settled_by', 'settled_by_name', 'efficiency_rate',
+            'items', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'settlement_number', 'total_delivered_value', 'total_sold_value', 
+            'total_returned_value', 'total_margin_earned', 'total_delivered_items',
+            'total_sold_items', 'total_returned_items', 'efficiency_rate',
+            'created_at', 'updated_at'
+        ]
+
+
+class SalesmanStockOverviewSerializer(serializers.Serializer):
+    """Serializer for salesman stock overview data"""
+    salesman_id = serializers.IntegerField()
+    salesman_name = serializers.CharField()
+    salesman_phone = serializers.CharField()
+    total_products = serializers.IntegerField()
+    total_stock_quantity = serializers.IntegerField()
+    total_stock_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    stock_by_product = serializers.ListField(child=serializers.DictField())
+    today_sales_quantity = serializers.IntegerField()
+    today_sales_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pending_deliveries = serializers.IntegerField()
+    last_delivery_date = serializers.DateTimeField(allow_null=True)
+
+
+class SalesmanSettlementQueueSerializer(serializers.Serializer):
+    """Serializer for settlement queue data"""
+    salesman_id = serializers.IntegerField()
+    salesman_name = serializers.CharField()
+    salesman_phone = serializers.CharField()
+    deliveries = serializers.ListField(child=serializers.DictField())
+    total_deliveries = serializers.IntegerField()
+    total_outstanding_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    oldest_delivery_date = serializers.DateTimeField(allow_null=True)
+
+
+class SettleSalesmanRequestSerializer(serializers.Serializer):
+    """Serializer for settle salesman request"""
+    salesman_id = serializers.IntegerField()
     settlement_notes = serializers.CharField(required=False, allow_blank=True)
-    items = DeliverySettlementItemSerializer(many=True)
+    return_all_stock = serializers.BooleanField(default=True)
+    create_settlement_record = serializers.BooleanField(default=True)
 
 
-class SettleDeliverySerializer(serializers.Serializer):
-    """Serializer for settling a delivery"""
-    settlement_notes = serializers.CharField(required=False, allow_blank=True)
-    items = serializers.ListField(
-        child=serializers.DictField(),
-        help_text="List of items with delivery_item_id, remaining_quantity, and margin_earned"
-    )
+class SalesmanDailySummarySerializer(serializers.Serializer):
+    """Serializer for daily summary data"""
+    salesman_id = serializers.IntegerField()
+    salesman_name = serializers.CharField()
+    deliveries_count = serializers.IntegerField()
+    deliveries_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    sales_quantity = serializers.IntegerField()
+    sales_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    outstanding_items = serializers.IntegerField()
+    outstanding_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    recommendation = serializers.CharField()
+    efficiency_rate = serializers.DecimalField(max_digits=5, decimal_places=1)
 
 
 class BatchSerializer(serializers.ModelSerializer):

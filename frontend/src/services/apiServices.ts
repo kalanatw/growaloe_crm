@@ -369,6 +369,7 @@ export const companyService = {
 };
 
 export const deliveryService = {
+  // Legacy delivery methods (kept for backward compatibility)
   getDeliveries: async (): Promise<{ results: Delivery[] }> => {
     return apiClient.get<{ results: Delivery[] }>('/products/deliveries/');
   },
@@ -393,6 +394,187 @@ export const deliveryService = {
     return apiClient.post<Delivery>(`/products/deliveries/${id}/mark_delivered/`);
   },
 
+  // New salesman-centric delivery management methods
+  getSalesmanOverview: async (): Promise<{
+    salesmen_count: number;
+    total_stock_value: number;
+    total_products_distributed: number;
+    salesmen: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      salesman_phone: string;
+      total_products: number;
+      total_stock_quantity: number;
+      total_stock_value: number;
+      stock_by_product: Array<{
+        product_id: number;
+        product_name: string;
+        product_sku: string;
+        unit_price: number;
+        quantity: number;
+        total_value: number;
+      }>;
+      today_sales_quantity: number;
+      today_sales_revenue: number;
+      pending_deliveries: number;
+      last_delivery_date: string | null;
+    }>;
+  }> => {
+    return apiClient.get('/products/salesman-deliveries/stock_overview/');
+  },
+
+  getSettlementQueue: async (): Promise<{
+    salesmen_count: number;
+    total_deliveries_pending: number;
+    total_outstanding_value: number;
+    salesmen: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      salesman_phone: string;
+      deliveries: Array<{
+        delivery_id: number;
+        delivery_number: string;
+        delivery_date: string;
+        total_items: number;
+        total_value: number;
+        outstanding_quantity: number;
+        outstanding_value: number;
+        items: Array<{
+          delivery_item_id: number;
+          product_id: number;
+          product_name: string;
+          product_sku: string;
+          delivered_quantity: number;
+          sold_quantity: number;
+          outstanding_quantity: number;
+          unit_price: number;
+          outstanding_value: number;
+        }>;
+      }>;
+      total_deliveries: number;
+      total_outstanding_value: number;
+      oldest_delivery_date: string | null;
+    }>;
+  }> => {
+    return apiClient.get('/products/salesman-deliveries/settlement_queue/');
+  },
+
+  getSalesmanBySummary: async (): Promise<{
+    total_salesmen: number;
+    salesmen_with_stock: number;
+    total_outstanding_value: number;
+    salesmen: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      salesman_phone: string;
+      outstanding_value: number;
+      outstanding_items: number;
+      recent_deliveries: number;
+      today_sales_revenue: number;
+      status: 'has_stock' | 'no_stock';
+      priority: 'high' | 'normal';
+    }>;
+  }> => {
+    return apiClient.get('/products/deliveries/by-salesman/');
+  },
+
+  getSalesmanDeliveryDetails: async (salesmanId: number): Promise<{
+    salesman: {
+      id: number;
+      name: string;
+      phone: string;
+      email: string;
+      joined_date: string;
+      is_active: boolean;
+    };
+    current_stock: {
+      total_products: number;
+      total_quantity: number;
+      total_value: number;
+      products: Array<{
+        product_id: number;
+        product_name: string;
+        product_sku: string;
+        quantity: number;
+        unit_price: number;
+        total_value: number;
+      }>;
+    };
+    deliveries: {
+      total_count: number;
+      pending_count: number;
+      delivered_count: number;
+      settled_count: number;
+      recent_deliveries: Delivery[];
+    };
+    sales_performance: {
+      last_30_days: Array<{
+        invoice__invoice_date__date: string;
+        daily_revenue: number;
+        daily_quantity: number;
+      }>;
+      total_revenue_30d: number;
+      total_quantity_30d: number;
+    };
+    settlements: {
+      recent_settlements: Array<any>;
+      total_settlements: number;
+    };
+  }> => {
+    return apiClient.get(`/products/deliveries/salesman/${salesmanId}/details/`);
+  },
+
+  settleSalesmanDeliveries: async (salesmanId: number, data: {
+    settlement_notes?: string;
+    return_all_stock?: boolean;
+    create_settlement_record?: boolean;
+  }): Promise<{
+    message: string;
+    salesman_name: string;
+    settlement_date: string;
+    settled_deliveries: number;
+    summary: {
+      total_delivered_items: number;
+      total_sold_items: number;
+      total_returned_items: number;
+      total_delivered_value: number;
+      total_sold_value: number;
+      total_returned_value: number;
+      efficiency_rate: number;
+    };
+    settlement_record?: any;
+  }> => {
+    return apiClient.post(`/products/deliveries/settle/${salesmanId}/`, data);
+  },
+
+  getDailySummary: async (date?: string): Promise<{
+    date: string;
+    summary: {
+      total_salesmen: number;
+      total_deliveries: number;
+      total_sales_revenue: number;
+      total_outstanding_value: number;
+      settlement_recommended: number;
+      review_required: number;
+    };
+    salesmen: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      deliveries_count: number;
+      deliveries_value: number;
+      sales_quantity: number;
+      sales_revenue: number;
+      outstanding_items: number;
+      outstanding_value: number;
+      recommendation: 'no_action' | 'settle_recommended' | 'review_required';
+      efficiency_rate: number;
+    }>;
+  }> => {
+    const params = date ? `?date=${date}` : '';
+    return apiClient.get(`/products/salesman-deliveries/daily_summary/${params}`);
+  },
+
+  // Legacy settlement methods (kept for backward compatibility)
   getSettlementData: async (id: number): Promise<{
     delivery_id: number;
     delivery_number: string;
@@ -452,5 +634,22 @@ export const deliveryService = {
     }>;
   }> => {
     return apiClient.get(`/products/deliveries/${id}/batch_assignments/`);
+  },
+
+  // Update sold quantities (called from invoice creation)
+  updateSoldQuantities: async (data: {
+    salesman_id: number;
+    invoice_items: Array<{
+      product_id: number;
+      quantity: number;
+      unit_price: number;
+    }>;
+  }): Promise<{
+    message: string;
+    salesman_name: string;
+    updated_assignments: Array<any>;
+    note: string;
+  }> => {
+    return apiClient.put('/products/deliveries/update-sold/', data);
   },
 };

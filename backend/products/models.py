@@ -362,6 +362,81 @@ class Delivery(models.Model):
         
         return settlement_data
     
+    def get_real_time_settlement_data(self):
+        """
+        Get real-time settlement data with updated sold quantities from invoices.
+        This replaces the old get_settlement_data method with more accurate calculations.
+        """
+        from sales.models import InvoiceItem
+        
+        settlement_data = []
+        for item in self.items.all():
+            # Get sold quantity for this exact product by this salesman since delivery
+            sold_qty = InvoiceItem.objects.filter(
+                invoice__salesman=self.salesman,
+                product=item.product,
+                invoice__invoice_date__gte=self.created_at,
+                invoice__status__in=['pending', 'paid', 'partial']
+            ).aggregate(total=models.Sum('quantity'))['total'] or 0
+            
+            remaining_qty = max(0, item.quantity - sold_qty)
+            
+            # Calculate actual margins earned from invoices (not estimated)
+            total_margin = InvoiceItem.objects.filter(
+                invoice__salesman=self.salesman,
+                product=item.product,
+                invoice__invoice_date__gte=self.created_at,
+                invoice__status__in=['pending', 'paid', 'partial']
+            ).aggregate(
+                total=models.Sum(
+                    models.F('quantity') * (models.F('unit_price') - models.F('product__base_price'))
+                )
+            )['total'] or 0
+            
+            settlement_data.append({
+                'delivery_item_id': item.id,
+                'product_id': item.product.id,
+                'product_name': item.product.name,
+                'product_sku': item.product.sku,
+                'delivered_quantity': item.quantity,
+                'sold_quantity': sold_qty,
+                'remaining_quantity': remaining_qty,
+                'unit_price': float(item.unit_price),
+                'outstanding_value': remaining_qty * float(item.unit_price),
+                'margin_earned': float(total_margin),
+            })
+        
+        return settlement_data
+    
+    def can_be_settled(self):
+        """Check if this delivery can be settled"""
+        return self.status == 'delivered'
+    
+    def get_settlement_summary(self):
+        """Get a quick summary for settlement decisions"""
+        settlement_data = self.get_real_time_settlement_data()
+        
+        total_delivered = sum(item['delivered_quantity'] for item in settlement_data)
+        total_sold = sum(item['sold_quantity'] for item in settlement_data)
+        total_remaining = sum(item['remaining_quantity'] for item in settlement_data)
+        total_margin = sum(item['margin_earned'] for item in settlement_data)
+        total_outstanding_value = sum(item['outstanding_value'] for item in settlement_data)
+        
+        return {
+            'delivery_id': self.id,
+            'delivery_number': self.delivery_number,
+            'salesman_name': self.salesman.user.get_full_name(),
+            'delivery_date': self.created_at,
+            'can_settle': self.can_be_settled(),
+            'total_delivered': total_delivered,
+            'total_sold': total_sold,
+            'total_remaining': total_remaining,
+            'total_margin_earned': total_margin,
+            'total_outstanding_value': total_outstanding_value,
+            'sale_completion_rate': (total_sold / total_delivered * 100) if total_delivered > 0 else 0,
+            'settlement_priority': 'high' if total_outstanding_value > 1000 else 'medium' if total_outstanding_value > 500 else 'low'
+        }
+    
     def settle_delivery(self, settlement_data, settlement_notes=""):
         """Settle the delivery by processing returned stock through batch assignments"""
         if self.status != 'delivered':
@@ -839,4 +914,124 @@ class BatchDefect(models.Model):
     def save(self, *args, **kwargs):
         if self.resolved and not self.resolved_at:
             self.resolved_at = timezone.now()
+        super().save(*args, **kwargs)
+
+
+class DeliverySettlement(models.Model):
+    """
+    Track daily settlements for salesmen.
+    Provides audit trail and prevents double-settlement.
+    """
+    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='delivery_settlements')
+    settlement_date = models.DateField()
+    settlement_number = models.CharField(max_length=50, unique=True)
+    
+    # Settlement totals
+    total_delivered_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_sold_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_returned_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_margin_earned = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    
+    # Item counts
+    total_delivered_items = models.PositiveIntegerField(default=0)
+    total_sold_items = models.PositiveIntegerField(default=0)
+    total_returned_items = models.PositiveIntegerField(default=0)
+    
+    # Status and metadata
+    status = models.CharField(max_length=20, choices=[
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled')
+    ], default='pending')
+    
+    settlement_notes = models.TextField(blank=True, null=True)
+    settled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='settlements_processed')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'delivery_settlements'
+        unique_together = [['salesman', 'settlement_date']]
+        ordering = ['-settlement_date', '-created_at']
+        indexes = [
+            models.Index(fields=['salesman', 'settlement_date']),
+            models.Index(fields=['settlement_date']),
+            models.Index(fields=['status']),
+        ]
+    
+    def __str__(self):
+        return f"Settlement {self.settlement_number} - {self.salesman.user.get_full_name()} ({self.settlement_date})"
+    
+    def save(self, *args, **kwargs):
+        if not self.settlement_number:
+            # Generate settlement number (SET-YYYYMMDD-XXX)
+            date_str = self.settlement_date.strftime('%Y%m%d')
+            
+            # Find the latest settlement for this date
+            latest = DeliverySettlement.objects.filter(
+                settlement_number__startswith=f'SET-{date_str}'
+            ).order_by('-settlement_number').first()
+            
+            if latest:
+                # Extract sequence number and increment
+                sequence = int(latest.settlement_number.split('-')[-1]) + 1
+            else:
+                sequence = 1
+                
+            self.settlement_number = f'SET-{date_str}-{sequence:03d}'
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def efficiency_rate(self):
+        """Calculate efficiency rate (sold value / delivered value * 100)"""
+        if self.total_delivered_value > 0:
+            return round((self.total_sold_value / self.total_delivered_value) * 100, 1)
+        return 0
+
+
+class DeliverySettlementItem(models.Model):
+    """
+    Individual items in a delivery settlement.
+    Tracks what was delivered, sold, and returned for each product.
+    """
+    settlement = models.ForeignKey(DeliverySettlement, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    
+    # Quantities
+    delivered_quantity = models.PositiveIntegerField()
+    sold_quantity = models.PositiveIntegerField(default=0)
+    returned_quantity = models.PositiveIntegerField(default=0)
+    
+    # Values
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    delivered_value = models.DecimalField(max_digits=10, decimal_places=2)
+    sold_value = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    returned_value = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    
+    # Margin calculation
+    margin_per_unit = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    total_margin_earned = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'delivery_settlement_items'
+        unique_together = [['settlement', 'product']]
+        indexes = [
+            models.Index(fields=['settlement', 'product']),
+        ]
+    
+    def __str__(self):
+        return f"{self.settlement.settlement_number} - {self.product.name}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate values
+        self.delivered_value = self.delivered_quantity * self.unit_price
+        self.sold_value = self.sold_quantity * self.unit_price
+        self.returned_value = self.returned_quantity * self.unit_price
+        self.total_margin_earned = self.sold_quantity * self.margin_per_unit
+        
         super().save(*args, **kwargs)
