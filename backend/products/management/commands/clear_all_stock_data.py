@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from products.models import Batch, BatchTransaction, BatchAssignment, CentralStock, Delivery, DeliveryItem
+from products.models import Batch, BatchTransaction, BatchAssignment, Delivery, DeliveryItem
 from sales.models import InvoiceItem, Invoice
 
 
@@ -35,7 +35,6 @@ class Command(BaseCommand):
             batch_count = Batch.objects.count()
             batch_transaction_count = BatchTransaction.objects.count()
             batch_assignment_count = BatchAssignment.objects.count()
-            central_stock_count = CentralStock.objects.count()
             invoice_item_count = InvoiceItem.objects.count()
             invoice_count = Invoice.objects.count()
             delivery_item_count = DeliveryItem.objects.count()
@@ -63,16 +62,12 @@ class Command(BaseCommand):
             self.stdout.write('Deleting batches...')
             Batch.objects.all().delete()
 
-            self.stdout.write('Deleting central stock records...')
-            CentralStock.objects.all().delete()
-
             self.stdout.write(
                 self.style.SUCCESS(
                     f'Successfully cleared all stock data:\n'
                     f'- {batch_count} batches deleted\n'
                     f'- {batch_transaction_count} batch transactions deleted\n'
                     f'- {batch_assignment_count} batch assignments deleted\n'
-                    f'- {central_stock_count} central stock records deleted\n'
                     f'- {invoice_item_count} invoice items deleted\n'
                     f'- {invoice_count} invoices deleted\n'
                     f'- {delivery_item_count} delivery items deleted\n'

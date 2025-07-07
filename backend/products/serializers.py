@@ -4,7 +4,7 @@ from django.db.models import Sum
 from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, SalesmanStock, StockMovement, Delivery, DeliveryItem, CentralStock, Batch, BatchTransaction, BatchAssignment
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect
 from accounts.models import Salesman
 
 User = get_user_model()
@@ -54,40 +54,29 @@ class ProductSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             if request.user.role == 'salesman':
-                # For salesmen, show their available stock
+                # For salesmen, show their available stock from batch assignments
                 try:
-                    central_stock = CentralStock.objects.filter(
-                        product=obj,
-                        location_type='salesman',
-                        location_id=request.user.salesman_profile.id
-                    ).first()
-                    return central_stock.quantity if central_stock else 0
+                    assignments = BatchAssignment.objects.filter(
+                        batch__product=obj,
+                        salesman=request.user.salesman_profile,
+                        status__in=['delivered', 'partial']
+                    )
+                    return sum(assignment.outstanding_quantity for assignment in assignments)
                 except Exception:
                     return 0
         
-        # For owners and others, show total owner stock
-        owner_stock_total = CentralStock.objects.filter(
-            product=obj, 
-            location_type='owner'
-        ).aggregate(total=Sum('quantity'))['total'] or 0
-        return owner_stock_total
+        # For owners and others, show total product stock
+        return obj.total_stock
 
     @extend_schema_field(serializers.IntegerField)
     def get_owner_stock(self, obj):
-        """Get owner stock quantity"""
-        owner_stock_total = CentralStock.objects.filter(
-            product=obj, 
-            location_type='owner'
-        ).aggregate(total=Sum('quantity'))['total'] or 0
-        return owner_stock_total
+        """Get owner stock quantity (unallocated batches)"""
+        return obj.owner_stock
 
     @extend_schema_field(serializers.IntegerField)
     def get_total_salesman_stock(self, obj):
         """Get total stock with all salesmen"""
-        return CentralStock.objects.filter(
-            product=obj, 
-            location_type='salesman'
-        ).aggregate(total=Sum('quantity'))['total'] or 0
+        return obj.salesman_stock
 
 
 class ProductCreateSerializer(serializers.ModelSerializer):
@@ -130,32 +119,28 @@ class ProductCreateSerializer(serializers.ModelSerializer):
 
 
 class SalesmanStockSerializer(serializers.ModelSerializer):
-    """Serializer for salesman stock using CentralStock"""
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    product_sku = serializers.CharField(source='product.sku', read_only=True)
-    product_base_price = serializers.DecimalField(source='product.base_price', max_digits=10, decimal_places=2, read_only=True)
-    salesman_name = serializers.SerializerMethodField()
-    allocated_quantity = serializers.IntegerField(source='quantity', read_only=True)
-    available_quantity = serializers.IntegerField(source='quantity', read_only=True)
+    """Serializer for salesman stock using Batch Assignments"""
+    product_name = serializers.CharField(source='batch.product.name', read_only=True)
+    product_sku = serializers.CharField(source='batch.product.sku', read_only=True)
+    product_base_price = serializers.DecimalField(source='batch.product.base_price', max_digits=10, decimal_places=2, read_only=True)
+    salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
+    outstanding_quantity = serializers.SerializerMethodField()
     
     class Meta:
-        model = CentralStock
+        model = BatchAssignment
         fields = [
-            'id', 'product', 'product_name', 'product_sku',
-            'product_base_price', 'salesman_name', 'allocated_quantity', 'available_quantity',
-            'created_at', 'updated_at'
+            'id', 'batch', 'batch_number', 'salesman', 'salesman_name',
+            'product_name', 'product_sku', 'product_base_price', 
+            'delivered_quantity', 'returned_quantity', 'outstanding_quantity',
+            'expiry_date', 'status', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'product_base_price', 'salesman_name']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'product_base_price', 'salesman_name', 'batch_number', 'expiry_date', 'outstanding_quantity']
     
-    def get_salesman_name(self, obj):
-        """Get salesman name from location_id"""
-        if obj.location_type == 'salesman' and obj.location_id:
-            try:
-                salesman = Salesman.objects.get(id=obj.location_id)
-                return salesman.user.get_full_name()
-            except Salesman.DoesNotExist:
-                return "Unknown Salesman"
-        return "Owner"
+    def get_outstanding_quantity(self, obj):
+        """Get outstanding quantity (delivered - returned)"""
+        return obj.outstanding_quantity
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -309,78 +294,25 @@ class CreateDeliverySerializer(serializers.ModelSerializer):
                 product = item_data['product']
                 requested_quantity = item_data['quantity']
                 
-                # Create the delivery item
-                delivery_item = DeliveryItem.objects.create(delivery=delivery, **item_data)
-                
-                # Find available batches using FIFO (First In, First Out)
+                # Check stock availability before creating delivery item
                 available_batches = Batch.objects.filter(
                     product=product,
                     current_quantity__gt=0,
                     is_active=True
                 ).order_by('manufacturing_date', 'expiry_date')
                 
-                remaining_to_assign = requested_quantity
-                
-                for batch in available_batches:
-                    if remaining_to_assign <= 0:
-                        break
-                    
-                    # Determine how much we can take from this batch
-                    quantity_to_assign = min(batch.current_quantity, remaining_to_assign)
-                    
-                    if quantity_to_assign > 0:
-                        # Create batch assignment
-                        assignment = BatchAssignment.objects.create(
-                            batch=batch,
-                            salesman=delivery.salesman,  # Use the Salesman instance, not User
-                            quantity=quantity_to_assign,  # Use 'quantity', not 'assigned_quantity'
-                            delivered_quantity=quantity_to_assign,  # Mark as delivered immediately
-                            status='delivered',  # Set status to delivered since this is for delivery
-                            delivery_date=delivery.delivery_date,
-                            notes=f"Assigned via delivery {delivery.delivery_number}",
-                            created_by=delivery.created_by
-                        )
-                        
-                        # Update batch current quantity
-                        batch.current_quantity -= quantity_to_assign
-                        batch.save()
-                        
-                        # Create batch transaction record
-                        BatchTransaction.objects.create(
-                            batch=batch,
-                            transaction_type='assignment',
-                            quantity=-quantity_to_assign,  # Negative for stock out
-                            balance_after=batch.current_quantity,
-                            reference_type='delivery',
-                            reference_id=delivery.id,
-                            notes=f"Assigned to {delivery.salesman.user.get_full_name()} via delivery {delivery.delivery_number}",
-                            created_by=delivery.created_by
-                        )
-                        
-                        remaining_to_assign -= quantity_to_assign
-                
-                # Check if we couldn't fulfill the complete request
-                if remaining_to_assign > 0:
+                total_available = sum(batch.available_quantity for batch in available_batches)
+                if total_available < requested_quantity:
                     raise serializers.ValidationError(
                         f"Insufficient stock for {product.name}. "
-                        f"Requested: {requested_quantity}, Available: {requested_quantity - remaining_to_assign}"
+                        f"Requested: {requested_quantity}, Available: {total_available}"
                     )
+                
+                # Create the delivery item - this will handle batch allocation via save() method
+                delivery_item = DeliveryItem.objects.create(delivery=delivery, **item_data)
         
         return delivery
 
-class CentralStockSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    product_sku = serializers.CharField(source='product.sku', read_only=True)
-    salesman_name = serializers.CharField(source='salesman.name', read_only=True)
-    
-    class Meta:
-        model = CentralStock
-        fields = [
-            'id', 'product', 'product_name', 'product_sku', 
-            'location', 'salesman', 'salesman_name', 'quantity',
-            'created_at', 'updated_at'
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'salesman_name']
 
 class DeliverySettlementItemSerializer(serializers.Serializer):
     """Serializer for individual items in delivery settlement"""
@@ -413,7 +345,7 @@ class SettleDeliverySerializer(serializers.Serializer):
 
 
 class BatchSerializer(serializers.ModelSerializer):
-    """Serializer for product batches"""
+    """Enhanced serializer for product batches with quality tracking"""
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
     allocated_quantity = serializers.SerializerMethodField()
@@ -421,16 +353,30 @@ class BatchSerializer(serializers.ModelSerializer):
     is_expired = serializers.SerializerMethodField()
     days_until_expiry = serializers.SerializerMethodField()
     
+    # Quality tracking fields
+    quality_score = serializers.SerializerMethodField()
+    is_problematic = serializers.SerializerMethodField()
+    defect_count = serializers.SerializerMethodField()
+    total_delivered = serializers.SerializerMethodField()
+    total_sold = serializers.SerializerMethodField()
+    utilization_percentage = serializers.SerializerMethodField()
+    
     class Meta:
         model = Batch
         fields = [
             'id', 'product', 'product_name', 'product_sku', 'batch_number',
             'manufacturing_date', 'expiry_date', 'initial_quantity', 'current_quantity',
             'allocated_quantity', 'available_quantity', 'unit_cost', 'notes',
-            'is_active', 'is_expired', 'days_until_expiry', 'created_at', 'updated_at'
+            'is_active', 'is_expired', 'days_until_expiry', 
+            'quality_status', 'recall_initiated_at', 'recall_reason', 
+            'total_returned', 'return_rate', 'quality_score', 'is_problematic',
+            'defect_count', 'total_delivered', 'total_sold', 'utilization_percentage',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku',
-                          'allocated_quantity', 'available_quantity', 'is_expired', 'days_until_expiry']
+                          'allocated_quantity', 'available_quantity', 'is_expired', 'days_until_expiry',
+                          'quality_score', 'is_problematic', 'defect_count', 'total_delivered', 
+                          'total_sold', 'utilization_percentage']
     
     @extend_schema_field(serializers.IntegerField)
     def get_allocated_quantity(self, obj):
@@ -447,6 +393,38 @@ class BatchSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.IntegerField)
     def get_days_until_expiry(self, obj):
         return obj.days_until_expiry
+    
+    @extend_schema_field(serializers.FloatField)
+    def get_quality_score(self, obj):
+        return obj.quality_score
+    
+    @extend_schema_field(serializers.BooleanField)
+    def get_is_problematic(self, obj):
+        return obj.is_problematic
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_defect_count(self, obj):
+        return obj.defects.count()
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_total_delivered(self, obj):
+        return obj.assignments.aggregate(
+            total=Sum('delivered_quantity')
+        )['total'] or 0
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_total_sold(self, obj):
+        from sales.models import InvoiceItem
+        return InvoiceItem.objects.filter(batch=obj).aggregate(
+            total=Sum('quantity')
+        )['total'] or 0
+    
+    @extend_schema_field(serializers.FloatField)
+    def get_utilization_percentage(self, obj):
+        if obj.initial_quantity == 0:
+            return 0
+        sold = self.get_total_sold(obj)
+        return round((sold / obj.initial_quantity) * 100, 2)
     
     def validate(self, data):
         # Ensure manufacturing date is not in the future

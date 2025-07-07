@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from accounts.models import Owner, Salesman, Shop, MarginPolicy
-from products.models import Category, Product, CentralStock
+from products.models import Category, Product, Batch
 from sales.models import Invoice, InvoiceItem, Transaction
 from decimal import Decimal
 from datetime import date, timedelta
@@ -196,28 +196,15 @@ class Command(BaseCommand):
             )
             products.append(product)
 
-        # Create CentralStock for salesmen
+        # Create initial batches for each product using add_stock method
         for product in products:
-            # Stock for salesman1
-            quantity = random.randint(80, 200)
-            CentralStock.objects.get_or_create(
-                location_type='salesman',
-                location_id=salesman1.id,
-                product=product,
-                defaults={
-                    'quantity': quantity
-                }
-            )
-            
-            # Stock for salesman2
-            quantity = random.randint(60, 150)
-            CentralStock.objects.get_or_create(
-                location_type='salesman',
-                location_id=salesman2.id,
-                product=product,
-                defaults={
-                    'quantity': quantity
-                }
+            # Add initial stock to owner using batches
+            initial_stock = random.randint(300, 800)
+            product.add_stock(
+                quantity=initial_stock,
+                user=User.objects.filter(is_superuser=True).first(),
+                notes=f"Initial stock for {product.name}",
+                batch_number=f"INIT-{product.sku}-001"
             )
 
         # Create Sample Invoices

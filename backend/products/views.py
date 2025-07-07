@@ -12,7 +12,7 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 import logging
 
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, CentralStock, Batch, BatchTransaction, BatchAssignment
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductCreateSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
@@ -20,6 +20,7 @@ from .serializers import (
     DeliveryItemSerializer, DeliverySettlementSerializer, SettleDeliverySerializer,
     BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer
 )
+from sales.serializers import BatchRecallSerializer
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 
 User = get_user_model()
@@ -277,7 +278,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         db_logger.info(f"Product created successfully: ID={product.id}, SKU={product.sku}, Name={product.name}")
         db_logger.info(f"Category: {product.category.name if product.category else 'None'}")
         
-        # No initial stock creation - stock will be managed via CentralStock separately
+        # No initial stock creation - stock will be managed via batch system
 
     def perform_update(self, serializer):
         """
@@ -298,9 +299,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         db_logger.info(f"Deleting product: ID={instance.id}, SKU={instance.sku}, Name={instance.name}")
         
         # Check if product has stock
-        total_stock = CentralStock.objects.filter(product=instance).aggregate(
-            total=Sum('quantity')
-        )['total'] or 0
+        total_stock = instance.total_stock
         
         if total_stock > 0:
             db_logger.warning(f"Attempting to delete product with existing stock: {total_stock}")
@@ -422,35 +421,47 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def stock_by_salesman(self, request, pk=None):
         """
-        Get stock distribution for a specific product across salesmen
+        Get stock distribution for a specific product across salesmen using batch assignments
         """
         product = self.get_object()
-        # Get salesman stocks from central stock
-        stocks = CentralStock.objects.filter(
-            product=product, 
-            location_type='salesman'
-        ).select_related('product')
         
-        # Create response with salesman info
+        # Get batch assignments for this product
+        assignments = BatchAssignment.objects.filter(
+            batch__product=product,
+            status__in=['delivered', 'partial']
+        ).select_related('salesman__user', 'batch')
+        
+        # Group by salesman and aggregate
+        salesman_stocks = {}
+        for assignment in assignments:
+            salesman_id = assignment.salesman.id
+            if salesman_id not in salesman_stocks:
+                salesman_stocks[salesman_id] = {
+                    'salesman': assignment.salesman,
+                    'total_outstanding': 0,
+                    'assignments': []
+                }
+            
+            outstanding = assignment.outstanding_quantity
+            salesman_stocks[salesman_id]['total_outstanding'] += outstanding
+            salesman_stocks[salesman_id]['assignments'].append({
+                'batch_number': assignment.batch.batch_number,
+                'outstanding_quantity': outstanding
+            })
+        
+        # Create response
         stock_data = []
-        for stock in stocks:
-            try:
-                from accounts.models import Salesman
-                salesman = Salesman.objects.get(id=stock.location_id)
+        for salesman_id, data in salesman_stocks.items():
+            if data['total_outstanding'] > 0:
                 stock_data.append({
-                    'id': stock.id,
-                    'product': stock.product.id,
-                    'product_name': stock.product.name,
-                    'product_sku': stock.product.sku,
-                    'product_base_price': float(stock.product.base_price),
-                    'salesman_name': salesman.user.get_full_name(),
-                    'allocated_quantity': stock.quantity,
-                    'available_quantity': stock.quantity,
-                    'created_at': stock.created_at.isoformat(),
-                    'updated_at': stock.updated_at.isoformat(),
+                    'salesman_id': salesman_id,
+                    'salesman_name': data['salesman'].user.get_full_name(),
+                    'product_id': product.id,
+                    'product_name': product.name,
+                    'product_sku': product.sku,
+                    'total_outstanding_quantity': data['total_outstanding'],
+                    'batch_assignments': data['assignments']
                 })
-            except Salesman.DoesNotExist:
-                continue
         
         return Response(stock_data)
 
@@ -764,50 +775,45 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def stock_status(self, request, pk=None):
         """
-        Get real-time stock status for a product
+        Get real-time stock status for a product using batch system
         """
         product = self.get_object()
         
-        # Get salesman allocations from central stock
-        salesman_stocks = CentralStock.objects.filter(
-            product=product, 
-            location_type='salesman'
-        )
+        # Get salesman allocations from batch assignments
+        assignments = BatchAssignment.objects.filter(
+            batch__product=product,
+            status__in=['delivered', 'partial']
+        ).select_related('salesman__user')
         
-        total_allocated = sum(stock.quantity for stock in salesman_stocks)
-        total_available = sum(stock.quantity for stock in salesman_stocks)
+        # Group by salesman
+        salesman_data = {}
+        total_allocated = 0
         
-        salesman_data = []
-        for stock in salesman_stocks:
-            try:
-                from accounts.models import Salesman
-                salesman = Salesman.objects.get(id=stock.location_id)
-                salesman_data.append({
-                    'salesman_name': salesman.user.get_full_name(),
-                    'allocated': stock.quantity,
-                    'available': stock.quantity,
-                    'sold': 0  # For now, we'll implement sold tracking later
-                })
-            except Salesman.DoesNotExist:
-                continue
+        for assignment in assignments:
+            salesman_id = assignment.salesman.id
+            if salesman_id not in salesman_data:
+                salesman_data[salesman_id] = {
+                    'salesman_name': assignment.salesman.user.get_full_name(),
+                    'allocated': 0,
+                    'available': 0,
+                    'sold': 0
+                }
+            
+            outstanding = assignment.outstanding_quantity
+            salesman_data[salesman_id]['allocated'] += assignment.delivered_quantity
+            salesman_data[salesman_id]['available'] += outstanding
+            salesman_data[salesman_id]['sold'] += (assignment.delivered_quantity - outstanding)
+            total_allocated += outstanding
         
-        # Get owner stock from central stock
-        try:
-            owner_stock = CentralStock.objects.get(
-                product=product,
-                location_type='owner',
-                location_id__isnull=True
-            )
-            owner_stock_quantity = owner_stock.quantity
-        except CentralStock.DoesNotExist:
-            owner_stock_quantity = 0
+        # Get owner stock (unallocated batches)
+        owner_stock_quantity = product.total_stock - total_allocated
         
         return Response({
             'owner_stock': owner_stock_quantity,
             'total_allocated': total_allocated,
-            'total_available': total_available,
+            'total_available': total_allocated,
             'low_stock_alert': product.is_low_stock,
-            'salesman_allocations': salesman_data
+            'salesman_allocations': list(salesman_data.values())
         })
 
     @extend_schema(
@@ -997,15 +1003,15 @@ class ProductViewSet(viewsets.ModelViewSet):
 )
 class SalesmanStockViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing salesman stock allocations using CentralStock
+    ViewSet for managing salesman stock allocations using Batch Assignments
     """
-    queryset = CentralStock.objects.filter(location_type='salesman').select_related('product').all()
-    serializer_class = SalesmanStockSerializer
+    queryset = BatchAssignment.objects.filter(status__in=['delivered', 'partial']).select_related('batch__product', 'salesman__user').all()
+    serializer_class = BatchAssignmentSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['location_id', 'product']
-    search_fields = ['product__name', 'product__sku']
-    ordering_fields = ['quantity', 'created_at', 'updated_at']
+    filterset_fields = ['salesman', 'batch__product']
+    search_fields = ['batch__product__name', 'batch__product__sku', 'salesman__user__first_name', 'salesman__user__last_name']
+    ordering_fields = ['delivered_quantity', 'created_at', 'updated_at']
     ordering = ['-updated_at']
 
     def get_queryset(self):
@@ -1014,7 +1020,7 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
 
         if user.role == 'salesman':
             # Salesmen can only see their own stock
-            return queryset.filter(location_id=user.salesman_profile.id)
+            return queryset.filter(salesman=user.salesman_profile)
         elif user.role == 'shop':
             # Shops can see stock of salesmen assigned to them - this will need adjustment
             # For now, return empty queryset since shops don't directly manage stock
@@ -1068,7 +1074,7 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def my_stock(self, request):
         """
-        Get current user's stock from CentralStock (for salesmen)
+        Get current user's stock from batch assignments (for salesmen)
         """
         if request.user.role != 'salesman':
             return Response(
@@ -1076,33 +1082,53 @@ class SalesmanStockViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get salesman's stock from CentralStock
-        salesman_stocks = CentralStock.objects.filter(
-            location_type='salesman',
-            location_id=request.user.salesman_profile.id,
-            quantity__gt=0  # Only show products with stock > 0
-        ).select_related('product')
+        # Get salesman's batch assignments
+        assignments = BatchAssignment.objects.filter(
+            salesman=request.user.salesman_profile,
+            status__in=['delivered', 'partial']
+        ).select_related('batch__product')
 
-        # Convert to serializable format
-        stock_data_list = []
+        # Group by product and aggregate
+        product_stocks = {}
         total_stock_value = 0
         
-        for stock in salesman_stocks:
-            stock_value = stock.quantity * stock.product.base_price
+        for assignment in assignments:
+            product = assignment.batch.product
+            outstanding_qty = assignment.outstanding_quantity
+            
+            if outstanding_qty > 0:
+                if product.id not in product_stocks:
+                    product_stocks[product.id] = {
+                        'product': product,
+                        'total_outstanding': 0,
+                        'batch_assignments': []
+                    }
+                
+                product_stocks[product.id]['total_outstanding'] += outstanding_qty
+                product_stocks[product.id]['batch_assignments'].append({
+                    'assignment_id': assignment.id,
+                    'batch_number': assignment.batch.batch_number,
+                    'outstanding_quantity': outstanding_qty,
+                    'expiry_date': assignment.batch.expiry_date.isoformat() if assignment.batch.expiry_date else None
+                })
+        
+        # Convert to response format
+        stock_data_list = []
+        for product_id, data in product_stocks.items():
+            product = data['product']
+            total_outstanding = data['total_outstanding']
+            stock_value = total_outstanding * product.base_price
             total_stock_value += stock_value
             
             stock_data_list.append({
-                'id': stock.id,
-                'salesman': request.user.salesman_profile.id,
-                'salesman_name': request.user.get_full_name(),
-                'product': stock.product.id,
-                'product_name': stock.product.name,
-                'product_sku': stock.product.sku,
-                'product_base_price': float(stock.product.base_price),
-                'allocated_quantity': stock.quantity,
-                'available_quantity': stock.quantity,  # For salesmen, allocated = available
-                'created_at': stock.created_at.isoformat(),
-                'updated_at': stock.updated_at.isoformat(),
+                'product_id': product.id,
+                'product_name': product.name,
+                'product_sku': product.sku,
+                'product_base_price': float(product.base_price),
+                'total_outstanding_quantity': total_outstanding,
+                'available_quantity': total_outstanding,
+                'batch_assignments': data['batch_assignments'],
+                'stock_value': float(stock_value)
             })
 
         return Response({
@@ -2205,5 +2231,588 @@ class BatchAssignmentViewSet(viewsets.ModelViewSet):
         
         serializer = BatchAssignmentSerializer(assignment)
         return Response(serializer.data)
+
+    @extend_schema(
+        summary="Mark batch as defective",
+        description="Mark an entire batch as defective and initiate recall process",
+        request=BatchRecallSerializer,
+        responses={
+            200: OpenApiResponse(description="Batch marked as defective successfully"),
+            400: OpenApiResponse(description="Invalid data provided"),
+            404: OpenApiResponse(description="Batch not found")
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def mark_defective(self, request, pk=None):
+        """Mark a batch as defective and initiate recall"""
+        try:
+            batch = self.get_object()
+            
+            # Get recall data from request
+            recall_reason = request.data.get('recall_reason', 'Quality issue detected')
+            severity = request.data.get('severity', 'medium')
+            recall_all_stock = request.data.get('recall_all_stock', True)
+            notify_customers = request.data.get('notify_customers', True)
+            
+            # Mark batch as defective
+            batch.quality_status = 'defective'
+            batch.recall_initiated_at = timezone.now()
+            batch.recall_reason = recall_reason
+            batch.is_active = False  # Deactivate the batch
+            batch.save()
+            
+            # Create defect record if BatchDefect model exists
+            try:
+                from products.models import BatchDefect
+                BatchDefect.objects.create(
+                    batch=batch,
+                    defect_type='quality_issue',
+                    severity=severity,
+                    description=recall_reason,
+
+
+
+                    reported_by=request.user
+                )
+           
+            except ImportError:
+                # BatchDefect model doesn't exist, log the defect info
+                db_logger.warning(f"BatchDefect model not found. Batch {batch.batch_number} marked defective: {recall_reason}")
+            
+            # Update batch assignments to recalled status if recalling all stock
+            if recall_all_stock:
+                from products.models import BatchAssignment
+                BatchAssignment.objects.filter(
+                    batch=batch,
+                    status__in=['delivered', 'partial']
+                ).update(status='recalled')
+            
+            # Create transaction record for the recall
+            BatchTransaction.objects.create(
+                batch=batch,
+                transaction_type='recall',
+                quantity=batch.current_quantity,
+                balance_after=0 if recall_all_stock else batch.current_quantity,
+                reference_type='batch_recall',
+                reference_id=batch.id,
+                notes=f"Batch recall initiated: {recall_reason}",
+                created_by=request.user
+            )
+            
+            # If recalling all stock, set current quantity to 0
+            if recall_all_stock:
+                batch.current_quantity = 0
+                batch.save()
+            
+            # Log the recall
+            db_logger.info(f"Batch {batch.batch_number} marked as defective by {request.user.username}. Reason: {recall_reason}")
+            
+            # Prepare response data
+            response_data = {
+                'message': f'Batch {batch.batch_number} has been marked as defective and recall initiated',
+                'batch_id': batch.id,
+                'batch_number': batch.batch_number,
+                'recall_reason': recall_reason,
+                'severity': severity,
+                'recall_initiated_at': batch.recall_initiated_at,
+                'stock_recalled': recall_all_stock,
+                'notify_customers': notify_customers
+            }
+            
+            # Add affected assignments info
+            if recall_all_stock:
+                affected_assignments = BatchAssignment.objects.filter(
+                    batch=batch,
+                    status='recalled'
+                ).select_related('salesman__user')
+                
+                response_data['affected_salesmen'] = [
+                    {
+                        'salesman_id': assignment.salesman.id,
+                        'salesman_name': assignment.salesman.user.get_full_name(),
+                        'recalled_quantity': assignment.delivered_quantity - assignment.returned_quantity
+                    }
+                    for assignment in affected_assignments
+                ]
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to mark batch as defective: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @extend_schema(
+        summary="Get batch quality analytics",
+        description="Get comprehensive quality analytics for a specific batch",
+        responses={
+            200: OpenApiResponse(description="Batch quality analytics retrieved successfully"),
+            404: OpenApiResponse(description="Batch not found")
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=True, methods=['get'])
+    def quality_analytics(self, request, pk=None):
+        """Get quality analytics for a batch"""
+        try:
+            batch = self.get_object()
+            from sales.models import Return, InvoiceItem
+            
+            # Get all returns for this batch
+            returns = Return.objects.filter(batch=batch, approved=True)
+            total_returned = returns.aggregate(total=Sum('quantity'))['total'] or 0
+            
+            # Get all sales for this batch
+            sales = InvoiceItem.objects.filter(batch=batch)
+            total_sold = sales.aggregate(total=Sum('quantity'))['total'] or 0
+            
+            # Calculate return rate
+            return_rate = (total_returned / total_sold * 100) if total_sold > 0 else 0
+            
+            # Group returns by reason
+            return_reasons = returns.values('reason').annotate(
+                count=Count('id'),
+                quantity=Sum('quantity')
+            ).order_by('-quantity')
+            
+            # Get defect records if available
+            defects = []
+            try:
+                from products.models import BatchDefect
+                defect_records = BatchDefect.objects.filter(batch=batch)
+                defects = [
+                    {
+                        'defect_type': defect.defect_type,
+                        'severity': defect.severity,
+                        'description': defect.description,
+                        'reported_by': defect.reported_by.get_full_name(),
+                        'created_at': defect.created_at
+                    }
+                    for defect in defect_records
+                ]
+            except ImportError:
+                pass
+            
+            analytics_data = {
+                'batch_id': batch.id,
+                'batch_number': batch.batch_number,
+                'product_name': batch.product.name,
+                'quality_status': batch.quality_status,
+                'quality_score': batch.quality_score() if hasattr(batch, 'quality_score') else None,
+                'is_problematic': batch.is_problematic() if hasattr(batch, 'is_problematic') else False,
+                'manufacturing_date': batch.manufacturing_date,
+                'expiry_date': batch.expiry_date,
+                'initial_quantity': batch.initial_quantity,
+                'current_quantity': batch.current_quantity,
+                'total_sold': total_sold,
+                'total_returned': total_returned,
+                'return_rate': return_rate,
+                'return_reasons': list(return_reasons),
+                'defects': defects,
+                'recall_info': {
+                    'is_recalled': batch.recall_initiated_at is not None,
+                    'recall_date': batch.recall_initiated_at,
+                    'recall_reason': getattr(batch, 'recall_reason', None)
+                }
+            }
+            
+            return Response(analytics_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get batch quality analytics: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @extend_schema(
+        summary="Get batch expiry alerts",
+        description="Get batches that are expiring within the specified number of days",
+        parameters=[
+            OpenApiParameter(
+                name='days',
+                description='Number of days ahead to check for expiry (default: 30)',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='urgency',
+                description='Filter by urgency level (critical, warning, normal)',
+                required=False,
+                type=str
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="List of batches expiring soon",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        value=[
+                            {
+                                'batch_id': 1,
+                                'batch_number': 'BATCH-001',
+                                'product_name': 'Sample Product',
+                                'product_sku': 'SKU001',
+                                'current_quantity': 50,
+                                'expiry_date': '2025-08-05',
+                                'days_to_expiry': 30,
+                                'urgency_level': 'warning',
+                                'manufacturing_date': '2025-01-01'
+                            }
+                        ]
+                    )
+                ]
+            )
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'], url_path='expiry-alerts')
+    def expiry_alerts(self, request):
+        """Get batches that are expiring within the specified number of days"""
+        days_ahead = int(request.query_params.get('days', 30))
+        urgency_filter = request.query_params.get('urgency', None)
+        
+        cutoff_date = timezone.now().date() + timedelta(days=days_ahead)
+        
+        # Get batches expiring within the specified timeframe
+        expiring_batches = Batch.objects.filter(
+            is_active=True,
+            expiry_date__isnull=False,
+            expiry_date__lte=cutoff_date,
+            expiry_date__gt=timezone.now().date(),  # Not already expired
+            current_quantity__gt=0
+        ).select_related('product').order_by('expiry_date')
+        
+        # Format response with urgency levels
+        alerts = []
+        for batch in expiring_batches:
+            days_to_expiry = batch.days_until_expiry
+            
+            # Determine urgency level
+            if days_to_expiry <= 7:
+                urgency_level = 'critical'
+            elif days_to_expiry <= 14:
+                urgency_level = 'warning'
+            else:
+                urgency_level = 'normal'
+            
+            # Apply urgency filter if specified
+            if urgency_filter and urgency_level != urgency_filter:
+                continue
+            
+            alerts.append({
+                'batch_id': batch.id,
+                'batch_number': batch.batch_number,
+                'product_id': batch.product.id,
+                'product_name': batch.product.name,
+                'product_sku': batch.product.sku,
+                'current_quantity': batch.current_quantity,
+                'expiry_date': batch.expiry_date,
+                'days_to_expiry': days_to_expiry,
+                'urgency_level': urgency_level,
+                'manufacturing_date': batch.manufacturing_date,
+                'unit_cost': str(batch.unit_cost)
+            })
+        
+        return Response({
+            'alerts': alerts,
+            'total_count': len(alerts),
+            'summary': {
+                'critical': len([a for a in alerts if a['urgency_level'] == 'critical']),
+                'warning': len([a for a in alerts if a['urgency_level'] == 'warning']),
+                'normal': len([a for a in alerts if a['urgency_level'] == 'normal'])
+            }
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Get batch low stock alerts",
+        description="Get batches that have stock below the specified threshold",
+        parameters=[
+            OpenApiParameter(
+                name='threshold',
+                description='Minimum stock threshold (default: 10)',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='percentage_threshold',
+                description='Percentage of initial quantity threshold (default: 20)',
+                required=False,
+                type=int
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="List of batches with low stock",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        value=[
+                            {
+                                'batch_id': 1,
+                                'batch_number': 'BATCH-001',
+                                'product_name': 'Sample Product',
+                                'product_sku': 'SKU001',
+                                'current_quantity': 5,
+                                'initial_quantity': 100,
+                                'threshold': 10,
+                                'percentage_remaining': 5.0,
+                                'severity': 'critical'
+                            }
+                        ]
+                    )
+                ]
+            )
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'], url_path='low-stock-alerts')
+    def low_stock_alerts(self, request):
+        """Get batches with stock below the specified threshold"""
+        absolute_threshold = int(request.query_params.get('threshold', 10))
+        percentage_threshold = int(request.query_params.get('percentage_threshold', 20))
+        
+        # Get active batches with stock
+        batches = Batch.objects.filter(
+            is_active=True,
+            current_quantity__gt=0
+        ).exclude(
+            expiry_date__lt=timezone.now().date()
+        ).select_related('product')
+        
+        low_stock_alerts = []
+        for batch in batches:
+            current_qty = batch.current_quantity
+            initial_qty = batch.initial_quantity
+            
+            # Calculate percentage remaining
+            percentage_remaining = (current_qty / initial_qty * 100) if initial_qty > 0 else 0
+            
+            # Check if batch meets low stock criteria
+            is_low_absolute = current_qty <= absolute_threshold
+            is_low_percentage = percentage_remaining <= percentage_threshold
+            
+            if is_low_absolute or is_low_percentage:
+                # Determine severity
+                if current_qty <= 5 or percentage_remaining <= 10:
+                    severity = 'critical'
+                elif current_qty <= absolute_threshold * 0.5 or percentage_remaining <= percentage_threshold * 0.5:
+                    severity = 'high'
+                else:
+                    severity = 'medium'
+                
+                low_stock_alerts.append({
+                    'batch_id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'product_id': batch.product.id,
+                    'product_name': batch.product.name,
+                    'product_sku': batch.product.sku,
+                    'current_quantity': current_qty,
+                    'initial_quantity': initial_qty,
+                    'available_quantity': batch.available_quantity,
+                    'threshold': absolute_threshold,
+                    'percentage_remaining': round(percentage_remaining, 2),
+                    'percentage_threshold': percentage_threshold,
+                    'severity': severity,
+                    'expiry_date': batch.expiry_date,
+                    'days_to_expiry': batch.days_until_expiry
+                })
+        
+        # Sort by severity and current quantity
+        severity_order = {'critical': 0, 'high': 1, 'medium': 2}
+        low_stock_alerts.sort(key=lambda x: (severity_order[x['severity']], x['current_quantity']))
+        
+        return Response({
+            'alerts': low_stock_alerts,
+            'total_count': len(low_stock_alerts),
+            'summary': {
+                'critical': len([a for a in low_stock_alerts if a['severity'] == 'critical']),
+                'high': len([a for a in low_stock_alerts if a['severity'] == 'high']),
+                'medium': len([a for a in low_stock_alerts if a['severity'] == 'medium'])
+            }
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Get batch quality alerts",
+        description="Get batches with quality issues or defects",
+        parameters=[
+            OpenApiParameter(
+                name='severity',
+                description='Filter by severity level (critical, high, medium, low)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='quality_status',
+                description='Filter by quality status (DEFECTIVE, WARNING, RECALLED)',
+                required=False,
+                type=str
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="List of batches with quality issues",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        value=[
+                            {
+                                'batch_id': 1,
+                                'batch_number': 'BATCH-001',
+                                'product_name': 'Sample Product',
+                                'product_sku': 'SKU001',
+                                'quality_status': 'WARNING',
+                                'quality_score': 75,
+                                'return_rate': 15.5,
+                                'defect_count': 2,
+                                'severity': 'medium'
+                            }
+                        ]
+                    )
+                ]
+            )
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'], url_path='quality-alerts')
+    def quality_alerts(self, request):
+        """Get batches with quality issues or defects"""
+        severity_filter = request.query_params.get('severity', None)
+        quality_status_filter = request.query_params.get('quality_status', None)
+        
+        # Get batches with potential quality issues
+        batches = Batch.objects.filter(
+            is_active=True
+        ).select_related('product').prefetch_related('defects')
+        
+        # Filter by quality status if specified
+        if quality_status_filter:
+            batches = batches.filter(quality_status=quality_status_filter)
+        else:
+            # Only include batches with quality concerns
+            batches = batches.filter(
+                models.Q(quality_status__in=['WARNING', 'DEFECTIVE', 'RECALLED']) |
+                models.Q(return_rate__gt=5) |
+                models.Q(defects__isnull=False)
+            ).distinct()
+        
+        quality_alerts = []
+        for batch in batches:
+            defect_count = batch.defects.count()
+            critical_defects = batch.defects.filter(severity='CRITICAL').count()
+            high_defects = batch.defects.filter(severity='HIGH').count()
+            
+            # Determine overall severity
+            if batch.quality_status == 'RECALLED' or critical_defects > 0:
+                severity = 'critical'
+            elif batch.quality_status == 'DEFECTIVE' or high_defects > 0 or batch.return_rate > 15:
+                severity = 'high'
+            elif batch.quality_status == 'WARNING' or batch.return_rate > 5:
+                severity = 'medium'
+            else:
+                severity = 'low'
+            
+            # Apply severity filter if specified
+            if severity_filter and severity != severity_filter:
+                continue
+            
+            # Get latest defect for additional context
+            latest_defect = batch.defects.order_by('-created_at').first()
+            
+            quality_alerts.append({
+                'batch_id': batch.id,
+                'batch_number': batch.batch_number,
+                'product_id': batch.product.id,
+                'product_name': batch.product.name,
+                'product_sku': batch.product.sku,
+                'quality_status': batch.quality_status,
+                'quality_score': batch.quality_score,
+                'return_rate': float(batch.return_rate),
+                'total_returned': float(batch.total_returned),
+                'defect_count': defect_count,
+                'critical_defects': critical_defects,
+                'high_defects': high_defects,
+                'severity': severity,
+                'current_quantity': batch.current_quantity,
+                'expiry_date': batch.expiry_date,
+                'recall_initiated_at': batch.recall_initiated_at,
+                'recall_reason': batch.recall_reason,
+                'latest_defect': {
+                    'type': latest_defect.defect_type,
+                    'severity': latest_defect.severity,
+                    'description': latest_defect.description,
+                    'created_at': latest_defect.created_at
+                } if latest_defect else None
+            })
+        
+        # Sort by severity and return rate
+        severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        quality_alerts.sort(key=lambda x: (severity_order[x['severity']], -x['return_rate']))
+        
+        return Response({
+            'alerts': quality_alerts,
+            'total_count': len(quality_alerts),
+            'summary': {
+                'critical': len([a for a in quality_alerts if a['severity'] == 'critical']),
+                'high': len([a for a in quality_alerts if a['severity'] == 'high']),
+                'medium': len([a for a in quality_alerts if a['severity'] == 'medium']),
+                'low': len([a for a in quality_alerts if a['severity'] == 'low'])
+            }
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Validate batch number availability",
+        description="Check if a batch number is available for use",
+        parameters=[
+            OpenApiParameter(
+                name='batch_number',
+                description='Batch number to validate',
+                required=True,
+                type=str
+            ),
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Batch number validation result",
+                examples=[
+                    OpenApiExample(
+                        'Available',
+                        value={
+                            'is_available': True,
+                            'message': 'Batch number is available'
+                        }
+                    ),
+                    OpenApiExample(
+                        'Not Available',
+                        value={
+                            'is_available': False,
+                            'message': 'Batch number already exists'
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Missing batch_number parameter")
+        },
+        tags=['Batch Management']
+    )
+    @action(detail=False, methods=['get'], url_path='validate-batch-number')
+    def validate_batch_number(self, request):
+        """Validate if batch number is available"""
+        batch_number = request.query_params.get('batch_number')
+        
+        if not batch_number:
+            return Response(
+                {'error': 'batch_number parameter is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        exists = Batch.objects.filter(batch_number=batch_number).exists()
+        
+        return Response({
+            'is_available': not exists,
+            'message': 'Batch number already exists' if exists else 'Batch number is available'
+        }, status=status.HTTP_200_OK)
 
 

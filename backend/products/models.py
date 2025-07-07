@@ -43,26 +43,45 @@ class Product(models.Model):
     
     @property
     def total_stock(self):
-        """Get total stock across all locations"""
-        return CentralStock.objects.filter(product=self).aggregate(
-            total=models.Sum('quantity')
+        """Get total stock from all batches"""
+        return self.batches.filter(is_active=True).aggregate(
+            total=models.Sum('current_quantity')
         )['total'] or 0
     
     @property
     def owner_stock(self):
-        """Get stock with owner"""
-        return CentralStock.objects.filter(
-            product=self, 
-            location_type='owner'
-        ).aggregate(total=models.Sum('quantity'))['total'] or 0
-    
+        """Get stock available with owner (unallocated batches)"""
+        total_batch_stock = self.batches.filter(
+            is_active=True
+        ).aggregate(
+            total=models.Sum('current_quantity')
+        )['total'] or 0
+        
+        return max(0, total_batch_stock - self.allocated_stock)
+
+    @property
+    def allocated_stock(self):
+        """Get total stock allocated to salesmen"""
+        delivered_quantity = BatchAssignment.objects.filter(
+            batch__product=self,
+            status__in=['pending', 'delivered', 'partial']
+        ).aggregate(
+            total=models.Sum('delivered_quantity')
+        )['total'] or 0
+        
+        returned_quantity = BatchAssignment.objects.filter(
+            batch__product=self,
+            status__in=['delivered', 'partial', 'returned']
+        ).aggregate(
+            total=models.Sum('returned_quantity')
+        )['total'] or 0
+        
+        return max(0, delivered_quantity - returned_quantity)
+
     @property
     def salesman_stock(self):
-        """Get total stock with all salesmen"""
-        return CentralStock.objects.filter(
-            product=self, 
-            location_type='salesman'
-        ).aggregate(total=models.Sum('quantity'))['total'] or 0
+        """Get total stock with all salesmen (outstanding allocations)"""
+        return self.allocated_stock
     
     @property
     def is_low_stock(self):
@@ -128,26 +147,7 @@ class Product(models.Model):
             created_by=user
         )
         
-        # Update central stock for backward compatibility
-        central_stock = CentralStock.objects.filter(
-            product=self,
-            location_type='owner',
-            location_id=None
-        ).first()
-        
-        if not central_stock:
-            central_stock = CentralStock.objects.create(
-                product=self,
-                location_type='owner',
-                location_id=None,
-                quantity=0
-            )
-        
-        old_quantity = central_stock.quantity
-        central_stock.quantity += quantity
-        central_stock.save()
-        
-        # Create stock movement record
+        # Create stock movement record for audit
         StockMovement.objects.create(
             product=self,
             movement_type='purchase',
@@ -157,34 +157,60 @@ class Product(models.Model):
         )
         
         return {
-            'old_quantity': old_quantity,
             'batch_id': batch.id,
             'batch_number': batch.batch_number,
-            'new_quantity': central_stock.quantity,
+            'new_quantity': batch.current_quantity,
             'added_quantity': quantity
         }
     
     def reduce_stock(self, quantity, user=None, notes=None, movement_type='adjustment'):
-        """Reduce stock from owner inventory"""
+        """Reduce stock from owner inventory using FIFO batch management"""
         if quantity <= 0:
             raise ValueError("Stock quantity must be positive")
         
-        # Get owner stock
-        try:
-            central_stock = CentralStock.objects.get(
-                product=self,
-                location_type='owner',
-                location_id=None
-            )
-        except CentralStock.DoesNotExist:
-            raise ValueError("No owner stock found for this product")
+        # Get available batches ordered by FIFO (manufacturing date, expiry date)
+        available_batches = self.batches.filter(
+            is_active=True,
+            current_quantity__gt=0
+        ).order_by('manufacturing_date', 'expiry_date')
         
-        if central_stock.quantity < quantity:
-            raise ValueError(f"Insufficient stock. Available: {central_stock.quantity}, Required: {quantity}")
+        # Check if enough stock is available
+        total_available = sum(batch.current_quantity for batch in available_batches)
+        if total_available < quantity:
+            raise ValueError(f"Insufficient stock. Available: {total_available}, Required: {quantity}")
         
-        old_quantity = central_stock.quantity
-        central_stock.quantity -= quantity
-        central_stock.save()
+        remaining_to_reduce = quantity
+        reduced_batches = []
+        
+        # Reduce from batches using FIFO
+        for batch in available_batches:
+            if remaining_to_reduce <= 0:
+                break
+                
+            if batch.current_quantity > 0:
+                reduce_from_batch = min(batch.current_quantity, remaining_to_reduce)
+                
+                # Update batch quantity
+                batch.current_quantity -= reduce_from_batch
+                batch.save()
+                
+                # Create batch transaction
+                BatchTransaction.objects.create(
+                    batch=batch,
+                    transaction_type=movement_type,
+                    quantity=-reduce_from_batch,
+                    balance_after=batch.current_quantity,
+                    notes=notes or f"Stock reduced: {reduce_from_batch} units",
+                    created_by=user
+                )
+                
+                reduced_batches.append({
+                    'batch_id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'reduced_quantity': reduce_from_batch
+                })
+                
+                remaining_to_reduce -= reduce_from_batch
         
         # Create stock movement record
         StockMovement.objects.create(
@@ -196,9 +222,8 @@ class Product(models.Model):
         )
         
         return {
-            'old_quantity': old_quantity,
-            'new_quantity': central_stock.quantity,
-            'reduced_quantity': quantity
+            'reduced_quantity': quantity,
+            'affected_batches': reduced_batches
         }
     
     class Meta:
@@ -210,81 +235,7 @@ class Product(models.Model):
         ]
 
 
-class CentralStock(models.Model):
-    """Centralized stock management - single source of truth"""
-    
-    LOCATION_TYPES = [
-        ('owner', 'Owner Stock'),
-        ('salesman', 'Salesman Stock'),
-    ]
-    
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_locations')
-    location_type = models.CharField(max_length=20, choices=LOCATION_TYPES)
-    location_id = models.PositiveIntegerField(null=True, blank=True)  # Salesman ID for salesman stock, None for owner
-    quantity = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    def __str__(self):
-        if self.location_type == 'owner':
-            return f"{self.product.name} - Owner Stock ({self.quantity})"
-        else:
-            try:
-                salesman = Salesman.objects.get(id=self.location_id)
-                return f"{self.product.name} - {salesman.name} ({self.quantity})"
-            except Salesman.DoesNotExist:
-                return f"{self.product.name} - Unknown Salesman ({self.quantity})"
-    
-    @property
-    def location_name(self):
-        """Get human readable location name"""
-        if self.location_type == 'owner':
-            return "Owner Stock"
-        else:
-            try:
-                salesman = Salesman.objects.get(id=self.location_id)
-                return salesman.name
-            except Salesman.DoesNotExist:
-                return "Unknown Salesman"
-    
-    class Meta:
-        db_table = 'central_stock'
-        unique_together = ['product', 'location_type', 'location_id']
-        indexes = [
-            models.Index(fields=['product', 'location_type']),
-            models.Index(fields=['location_type', 'location_id']),
-        ]
 
-
-class SalesmanStock(models.Model):
-    """DEPRECATED - keeping for backward compatibility, will be removed"""
-    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='stock_allocations')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='salesman_allocations')
-    allocated_quantity = models.PositiveIntegerField(default=0)
-    available_quantity = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    def __str__(self):
-        return f"{self.salesman.name} - {self.product.name} ({self.available_quantity})"
-    
-    @property
-    def sold_quantity(self):
-        """Calculate sold quantity"""
-        return self.allocated_quantity - self.available_quantity
-    
-    class Meta:
-        db_table = 'salesman_stock'
-        unique_together = ['salesman', 'product']
-    
-    @property
-    def sold_quantity(self):
-        """Calculate sold quantity"""
-        return self.allocated_quantity - self.available_quantity
-    
-    class Meta:
-        db_table = 'salesman_stock'
-        unique_together = ['salesman', 'product']
 
 
 class StockMovement(models.Model):
@@ -412,7 +363,7 @@ class Delivery(models.Model):
         return settlement_data
     
     def settle_delivery(self, settlement_data, settlement_notes=""):
-        """Settle the delivery by returning remaining stock and calculating margins"""
+        """Settle the delivery by processing returned stock through batch assignments"""
         if self.status != 'delivered':
             raise ValueError("Only delivered deliveries can be settled")
         
@@ -422,30 +373,47 @@ class Delivery(models.Model):
             delivery_item = self.items.get(id=item_data['delivery_item_id'])
             remaining_qty = item_data['remaining_quantity']
             
-            # Return remaining stock to owner
+            # Process returns through batch assignments
             if remaining_qty > 0:
-                owner_stock, _ = CentralStock.objects.get_or_create(
-                    product=delivery_item.product,
-                    location_type='owner',
-                    defaults={'quantity': 0}
-                )
-                owner_stock.quantity += remaining_qty
-                owner_stock.save()
+                # Find batch assignments for this salesman and product
+                assignments = BatchAssignment.objects.filter(
+                    batch__product=delivery_item.product,
+                    salesman=self.salesman,
+                    status__in=['delivered', 'partial']
+                ).order_by('created_at')
                 
-                # Remove remaining stock from salesman
-                try:
-                    salesman_stock = CentralStock.objects.get(
-                        product=delivery_item.product,
-                        location_type='salesman',
-                        location_id=self.salesman.id
-                    )
-                    salesman_stock.quantity -= remaining_qty
-                    if salesman_stock.quantity <= 0:
-                        salesman_stock.delete()
-                    else:
-                        salesman_stock.save()
-                except CentralStock.DoesNotExist:
-                    pass  # Stock already sold/transferred
+                # Return stock by updating assignment returned_quantity
+                remaining_to_return = remaining_qty
+                for assignment in assignments:
+                    if remaining_to_return <= 0:
+                        break
+                    
+                    outstanding = assignment.outstanding_quantity
+                    if outstanding > 0:
+                        return_qty = min(outstanding, remaining_to_return)
+                        assignment.returned_quantity += return_qty
+                        
+                        # Update assignment status
+                        if assignment.returned_quantity >= assignment.delivered_quantity:
+                            assignment.status = 'returned'
+                        elif assignment.returned_quantity > 0:
+                            assignment.status = 'partial'
+                        
+                        assignment.save()
+                        
+                        # Create batch transaction for return
+                        BatchTransaction.objects.create(
+                            batch=assignment.batch,
+                            transaction_type='return',
+                            quantity=return_qty,
+                            balance_after=assignment.batch.current_quantity,
+                            reference_type='delivery_settlement',
+                            reference_id=self.id,
+                            notes=f"Settlement return from {self.salesman.user.get_full_name()}",
+                            created_by=self.created_by
+                        )
+                        
+                        remaining_to_return -= return_qty
             
             total_margin_earned += item_data['margin_earned']
         
@@ -498,196 +466,109 @@ class DeliveryItem(models.Model):
         
         super().save(*args, **kwargs)
         
-        # Stock transfer is now handled by batch assignments in the serializer
-        # No need to transfer stock here as it's done via FIFO batch assignment
+        # Handle batch allocation when delivery item is created/updated
+        if is_new and self.delivery.status == 'pending':
+            self._allocate_stock_to_salesman()
     
     def delete(self, *args, **kwargs):
-        # Return stock to owner when item is deleted
-        self._return_stock_to_owner()
+        # Return allocated stock when item is deleted
+        self._deallocate_stock_from_salesman()
         super().delete(*args, **kwargs)
     
-    def _transfer_stock_to_salesman(self):
-        """Transfer stock from owner to salesman immediately upon delivery creation"""
-        try:
-            # Get owner stock
-            owner_stock = CentralStock.objects.get(
-                product=self.product,
-                location_type='owner'
-            )
-            
-            # Check if owner has enough stock
-            if owner_stock.quantity < self.quantity:
-                raise ValueError(f"Insufficient owner stock for {self.product.name}. Available: {owner_stock.quantity}, Required: {self.quantity}")
-            
-            # Reduce owner stock
-            owner_stock.quantity -= self.quantity
-            owner_stock.save()
-            
-            # Add to salesman stock
-            salesman_stock, created = CentralStock.objects.get_or_create(
-                product=self.product,
-                location_type='salesman',
-                location_id=self.delivery.salesman.id,
-                defaults={'quantity': 0}
-            )
-            salesman_stock.quantity += self.quantity
-            salesman_stock.save()
-            
-            # Mark delivery as delivered since stock is transferred
-            if self.delivery.status == 'pending':
-                self.delivery.status = 'delivered'
-                self.delivery.save()
-                
-        except CentralStock.DoesNotExist:
-            raise ValueError(f"No owner stock found for {self.product.name}")
-    
-    def _adjust_stock_for_change(self, old_quantity):
-        """Adjust stock when delivery item quantity changes"""
-        quantity_diff = self.quantity - old_quantity
+    def _allocate_stock_to_salesman(self):
+        """Allocate stock from owner's batches to salesman using FIFO"""
+        # Check if allocation already exists for this delivery item
+        existing_assignments = BatchAssignment.objects.filter(
+            delivery=self.delivery,
+            salesman=self.delivery.salesman,
+            notes__contains=f"Delivery: {self.delivery.delivery_number}"
+        )
         
-        if quantity_diff > 0:
-            # Increase: need more stock from owner
-            owner_stock = CentralStock.objects.get(
-                product=self.product,
-                location_type='owner'
-            )
-            if owner_stock.quantity < quantity_diff:
-                raise ValueError(f"Insufficient owner stock for {self.product.name}")
+        if existing_assignments.exists():
+            # Allocation already exists, skip to prevent duplication
+            return
             
-            owner_stock.quantity -= quantity_diff
-            owner_stock.save()
-            
-            salesman_stock = CentralStock.objects.get(
-                product=self.product,
-                location_type='salesman',
-                location_id=self.delivery.salesman.id
-            )
-            salesman_stock.quantity += quantity_diff
-            salesman_stock.save()
-            
-        elif quantity_diff < 0:
-            # Decrease: return stock to owner
-            return_qty = abs(quantity_diff)
-            
-            owner_stock, _ = CentralStock.objects.get_or_create(
-                product=self.product,
-                location_type='owner',
-                defaults={'quantity': 0}
-            )
-            owner_stock.quantity += return_qty
-            owner_stock.save()
-            
-            salesman_stock = CentralStock.objects.get(
-                product=self.product,
-                location_type='salesman',
-                location_id=self.delivery.salesman.id
-            )
-            salesman_stock.quantity -= return_qty
-            if salesman_stock.quantity <= 0:
-                salesman_stock.delete()
-            else:
-                salesman_stock.save()
-    
-    def _return_stock_to_owner(self):
-        """Return all stock of this item back to owner"""
-        try:
-            salesman_stock = CentralStock.objects.get(
-                product=self.product,
-                location_type='salesman',
-                location_id=self.delivery.salesman.id
-            )
-            
-            # Return stock to owner
-            owner_stock, _ = CentralStock.objects.get_or_create(
-                product=self.product,
-                location_type='owner',
-                defaults={'quantity': 0}
-            )
-            owner_stock.quantity += self.quantity
-            owner_stock.save()
-            
-            # Remove from salesman stock
-            salesman_stock.quantity -= self.quantity
-            if salesman_stock.quantity <= 0:
-                salesman_stock.delete()
-            else:
-                salesman_stock.save()
+        # Get available batches ordered by FIFO
+        available_batches = self.product.batches.filter(
+            is_active=True,
+            current_quantity__gt=0
+        ).order_by('manufacturing_date', 'expiry_date')
+        
+        # Check if enough stock is available
+        total_available = sum(batch.available_quantity for batch in available_batches)
+        if total_available < self.quantity:
+            raise ValueError(f"Insufficient stock for {self.product.name}. Available: {total_available}, Required: {self.quantity}")
+        
+        remaining_to_allocate = self.quantity
+        
+        # Allocate from batches using FIFO
+        for batch in available_batches:
+            if remaining_to_allocate <= 0:
+                break
                 
-        except CentralStock.DoesNotExist:
-            pass  # Stock might have been already sold/transferred
+            available_in_batch = batch.available_quantity
+            if available_in_batch > 0:
+                allocate_from_batch = min(available_in_batch, remaining_to_allocate)
+                
+                # Create batch assignment
+                assignment = BatchAssignment.objects.create(
+                    batch=batch,
+                    salesman=self.delivery.salesman,
+                    delivery=self.delivery,
+                    quantity=allocate_from_batch,
+                    delivered_quantity=allocate_from_batch,
+                    status='delivered',
+                    delivery_date=timezone.now(),
+                    notes=f"Delivery: {self.delivery.delivery_number}",
+                    created_by=self.delivery.created_by
+                )
+                
+                # Update batch current quantity
+                batch.current_quantity -= allocate_from_batch
+                batch.save()
+                
+                # Create batch transaction
+                BatchTransaction.objects.create(
+                    batch=batch,
+                    transaction_type='assignment',
+                    quantity=-allocate_from_batch,
+                    balance_after=batch.current_quantity,
+                    reference_type='delivery_item',
+                    reference_id=self.id,
+                    notes=f"Allocated to {self.delivery.salesman.user.get_full_name()}",
+                    created_by=self.delivery.created_by
+                )
+                
+                remaining_to_allocate -= allocate_from_batch
+        
+        # Mark delivery as delivered since stock is allocated
+        if self.delivery.status == 'pending':
+            self.delivery.status = 'delivered'
+            self.delivery.save()
     
-    def _update_central_stock(self, old_quantity=0, reverse=False):
-        """Update central stock system for delivery"""
-        try:
-            if reverse:
-                # Remove allocation - restore owner stock and remove salesman stock
-                quantity_change = -self.quantity
-            else:
-                # Add or adjust allocation
-                quantity_change = self.quantity - old_quantity
-            
-            if quantity_change == 0:
-                return
-            
-            # Get or create owner stock
-            owner_stock, created = CentralStock.objects.get_or_create(
-                product=self.product,
-                location_type='owner',
-                location_id=None,
-                defaults={'quantity': 0}
-            )
-            
-            # Check if owner has enough stock for delivery
-            if not reverse and quantity_change > 0:
-                if owner_stock.quantity < quantity_change:
-                    raise ValueError(f"Insufficient owner stock for {self.product.name}. Available: {owner_stock.quantity}, Required: {quantity_change}")
-            
-            # Update owner stock (reduce for delivery, increase for reversal)
-            if reverse:
-                owner_stock.quantity += abs(quantity_change)
-            else:
-                owner_stock.quantity -= quantity_change
-            
-            owner_stock.quantity = max(0, owner_stock.quantity)
-            owner_stock.save()
-            
-            # Get or create salesman stock
-            salesman_stock, created = CentralStock.objects.get_or_create(
-                product=self.product,
-                location_type='salesman',
-                location_id=self.delivery.salesman.id,
-                defaults={'quantity': 0}
-            )
-            
-            # Update salesman stock (increase for delivery, decrease for reversal)
-            salesman_stock.quantity += quantity_change
-            salesman_stock.quantity = max(0, salesman_stock.quantity)
-            salesman_stock.save()
-            
-            # Create stock movement records
-            StockMovement.objects.create(
-                product=self.product,
-                movement_type='allocation',
-                quantity=-quantity_change if not reverse else quantity_change,  # Negative for owner reduction
-                reference_id=self.delivery.delivery_number,
-                notes=f"Owner stock {'reduced' if not reverse else 'restored'} - Delivery: {self.delivery.delivery_number}",
+    def _deallocate_stock_from_salesman(self):
+        """Deallocate stock assignments when delivery item is deleted"""
+        # Find and remove batch assignments for this delivery item
+        assignments = BatchAssignment.objects.filter(
+            batch__product=self.product,
+            salesman=self.delivery.salesman,
+            notes__contains=f"Delivery: {self.delivery.delivery_number}"
+        )
+        
+        for assignment in assignments:
+            # Create reversal transaction
+            BatchTransaction.objects.create(
+                batch=assignment.batch,
+                transaction_type='return',
+                quantity=assignment.delivered_quantity - assignment.returned_quantity,
+                balance_after=assignment.batch.current_quantity,
+                reference_type='delivery_cancellation',
+                reference_id=self.id,
+                notes=f"Delivery cancelled: {self.delivery.delivery_number}",
                 created_by=self.delivery.created_by
             )
             
-            StockMovement.objects.create(
-                product=self.product,
-                movement_type='allocation',
-                quantity=quantity_change,
-                reference_id=self.delivery.delivery_number,
-                salesman=self.delivery.salesman,
-                notes=f"Salesman stock {'allocated' if not reverse else 'removed'} - Delivery: {self.delivery.delivery_number}",
-                created_by=self.delivery.created_by
-            )
-            
-        except Exception as e:
-            print(f"Error updating central stock: {e}")
-            # In production, you might want to raise the exception
-            # raise e
+            assignment.delete()
     
     class Meta:
         db_table = 'delivery_items'
@@ -705,6 +586,20 @@ class Batch(models.Model):
     unit_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, help_text="Cost per unit for this batch")
     notes = models.TextField(blank=True, null=True, help_text="Additional notes about this batch")
     is_active = models.BooleanField(default=True)
+    
+    # Quality tracking fields
+    quality_status = models.CharField(max_length=20, choices=[
+        ('GOOD', 'Good Quality'),
+        ('WARNING', 'Quality Warning'),
+        ('DEFECTIVE', 'Defective'),
+        ('RECALLED', 'Recalled')
+    ], default='GOOD', help_text="Quality status of the batch")
+    
+    recall_initiated_at = models.DateTimeField(null=True, blank=True, help_text="When recall was initiated")
+    recall_reason = models.TextField(blank=True, help_text="Reason for batch recall")
+    total_returned = models.DecimalField(max_digits=10, decimal_places=2, default=0, help_text="Total quantity returned")
+    return_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0, help_text="Return rate percentage")
+    
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_batches')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -742,9 +637,96 @@ class Batch(models.Model):
     
     @property
     def available_quantity(self):
-        """Get available quantity (current - allocated)"""
-        return self.current_quantity - self.allocated_quantity
-
+        """Get available quantity (current - allocated but not returned)"""
+        allocated = BatchAssignment.objects.filter(
+            batch=self,
+            status__in=['pending', 'delivered', 'partial']
+        ).aggregate(
+            total_delivered=models.Sum('delivered_quantity'),
+            total_returned=models.Sum('returned_quantity')
+        )
+        
+        total_allocated = (allocated['total_delivered'] or 0) - (allocated['total_returned'] or 0)
+        return max(0, self.current_quantity - total_allocated)
+    
+    @property
+    def quality_score(self):
+        """Calculate quality score based on returns and defects"""
+        if self.initial_quantity == 0:
+            return 100
+        
+        # Base score starts at 100
+        score = 100
+        
+        # Reduce score based on return rate
+        score -= min(self.return_rate, 50)  # Max 50 points reduction for returns
+        
+        # Reduce score based on defects
+        defect_count = self.defects.count()
+        critical_defects = self.defects.filter(severity='CRITICAL').count()
+        high_defects = self.defects.filter(severity='HIGH').count()
+        
+        score -= (critical_defects * 30)  # 30 points per critical defect
+        score -= (high_defects * 15)     # 15 points per high defect
+        score -= (defect_count * 5)      # 5 points per defect
+        
+        return max(0, score)
+    
+    @property
+    def is_problematic(self):
+        """Check if batch has quality issues"""
+        return (self.quality_status in ['WARNING', 'DEFECTIVE', 'RECALLED'] or 
+                self.return_rate > 10 or 
+                self.defects.filter(severity__in=['HIGH', 'CRITICAL']).exists())
+    
+    def update_return_rate(self):
+        """Update the return rate based on actual returns"""
+        from sales.models import Return
+        
+        total_sold = self.assignments.aggregate(
+            total=models.Sum('delivered_quantity')
+        )['total'] or 0
+        
+        total_returned = Return.objects.filter(
+            batch=self,
+            approved=True
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+        
+        if total_sold > 0:
+            self.return_rate = (total_returned / total_sold) * 100
+            self.total_returned = total_returned
+        else:
+            self.return_rate = 0
+            self.total_returned = 0
+        
+        # Update quality status based on return rate
+        if self.return_rate > 20:
+            self.quality_status = 'DEFECTIVE'
+        elif self.return_rate > 10:
+            self.quality_status = 'WARNING'
+        elif self.quality_status not in ['RECALLED']:
+            self.quality_status = 'GOOD'
+        
+        self.save()
+    
+    def initiate_recall(self, reason, user=None):
+        """Initiate a recall for this batch"""
+        self.quality_status = 'RECALLED'
+        self.recall_initiated_at = timezone.now()
+        self.recall_reason = reason
+        self.save()
+        
+        # Create a critical defect record
+        BatchDefect.objects.create(
+            batch=self,
+            defect_type='OTHER',
+            severity='CRITICAL',
+            description=f"Batch recalled: {reason}",
+            reported_by=user
+        )
+    
 
 class BatchTransaction(models.Model):
     """Track all batch stock movements for audit trail"""
@@ -787,6 +769,7 @@ class BatchAssignment(models.Model):
     
     batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='assignments')
     salesman = models.ForeignKey('accounts.Salesman', on_delete=models.CASCADE, related_name='batch_assignments')
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='batch_assignments', null=True, blank=True)
     quantity = models.PositiveIntegerField(help_text="Quantity assigned")
     delivered_quantity = models.PositiveIntegerField(default=0, help_text="Quantity actually delivered")
     returned_quantity = models.PositiveIntegerField(default=0, help_text="Quantity returned")
@@ -800,6 +783,8 @@ class BatchAssignment(models.Model):
     class Meta:
         db_table = 'batch_assignments'
         ordering = ['-created_at']
+        # Prevent duplicate assignments for the same batch and delivery
+        unique_together = [['batch', 'delivery', 'salesman']]
         
     def __str__(self):
         return f"{self.batch} -> {self.salesman.user.get_full_name()} ({self.quantity})"
@@ -808,3 +793,50 @@ class BatchAssignment(models.Model):
     def outstanding_quantity(self):
         """Get quantity still with salesman (delivered - returned)"""
         return self.delivered_quantity - self.returned_quantity
+    
+    @property
+    def sold_quantity(self):
+        """Get quantity sold (delivered - returned = sold + still with salesman)"""
+        # For now, we track outstanding. Sold quantity would come from invoice items
+        return 0  # This would be calculated from invoice items if needed
+
+
+class BatchDefect(models.Model):
+    """Track defects and quality issues in batches"""
+    DEFECT_TYPES = (
+        ('QUALITY', 'Quality Issue'),
+        ('CONTAMINATION', 'Contamination'),
+        ('EXPIRY', 'Premature Expiry'),
+        ('PACKAGING', 'Packaging Defect'),
+        ('OTHER', 'Other Issue'),
+    )
+    
+    SEVERITY_LEVELS = (
+        ('LOW', 'Low Risk'),
+        ('MEDIUM', 'Medium Risk'),
+        ('HIGH', 'High Risk'),
+        ('CRITICAL', 'Critical - Immediate Recall'),
+    )
+    
+    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='defects')
+    defect_type = models.CharField(max_length=50, choices=DEFECT_TYPES)
+    severity = models.CharField(max_length=20, choices=SEVERITY_LEVELS)
+    description = models.TextField(help_text="Detailed description of the defect")
+    reported_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='reported_defects')
+    reported_at = models.DateTimeField(auto_now_add=True)
+    resolved = models.BooleanField(default=False)
+    resolution_notes = models.TextField(blank=True, help_text="Notes on how the defect was resolved")
+    resolved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='resolved_defects')
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'batch_defects'
+        ordering = ['-reported_at']
+        
+    def __str__(self):
+        return f"{self.batch.batch_number} - {self.defect_type} ({self.severity})"
+    
+    def save(self, *args, **kwargs):
+        if self.resolved and not self.resolved_at:
+            self.resolved_at = timezone.now()
+        super().save(*args, **kwargs)

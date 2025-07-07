@@ -3,7 +3,7 @@ from django.dispatch import receiver
 from django.core.exceptions import ValidationError
 from django.db.models import F, Sum
 from django.utils import timezone
-from .models import Product, DeliveryItem, Delivery, CentralStock, BatchAssignment
+from .models import Product, DeliveryItem, Delivery, BatchAssignment, Batch
 from sales.models import InvoiceItem, Invoice
 
 
@@ -84,28 +84,19 @@ def validate_delivery_item_stock(sender, instance, **kwargs):
             pass
     
     if required_quantity > 0:
-        # Check owner stock in central stock
-        try:
-            owner_stock = CentralStock.objects.filter(
-                product=instance.product,
-                location_type='owner',
-                location_id=None
-            ).first()
-            
-            if not owner_stock:
-                raise ValidationError(
-                    f"No owner stock found for {instance.product.name}"
-                )
-                
-            if owner_stock.quantity < required_quantity:
-                raise ValidationError(
-                    f"Insufficient owner stock for {instance.product.name}. "
-                    f"Available: {owner_stock.quantity}, Required: {required_quantity}"
-                )
-        except Exception as e:
-            # Handle any other database errors gracefully
+        # Check owner stock using available batches
+        available_batches = Batch.objects.filter(
+            product=instance.product,
+            is_active=True,
+            current_quantity__gt=0
+        ).order_by('manufacturing_date', 'expiry_date')
+        
+        total_available = sum(batch.current_quantity for batch in available_batches)
+        
+        if total_available < required_quantity:
             raise ValidationError(
-                f"Error checking owner stock for {instance.product.name}: {str(e)}"
+                f"Insufficient stock for {instance.product.name}. "
+                f"Available: {total_available}, Required: {required_quantity}"
             )
 
 
@@ -115,16 +106,9 @@ def update_delivery_stock_on_status_change(sender, instance, created, **kwargs):
     Update stock allocations when delivery status changes to 'delivered'
     """
     if not created and instance.status == 'delivered':
-        # Check if status just changed to delivered
-        if hasattr(instance, '_state') and instance._state.adding is False:
-            try:
-                old_instance = Delivery.objects.get(pk=instance.pk)
-                if old_instance.status != 'delivered':
-                    # Status just changed to delivered, update all delivery items
-                    for item in instance.items.all():
-                        item._update_central_stock()
-            except Delivery.DoesNotExist:
-                pass
+        # Stock allocation is now handled by batch assignments in the serializer
+        # This signal is kept for potential future batch assignment logic
+        pass
 
 
 @receiver(pre_save, sender=Invoice)

@@ -176,7 +176,7 @@ class InvoiceItem(models.Model):
     
     def _update_stock_quantities(self, old_quantity=0, is_new=True):
         """Update batch stock system for invoice items"""
-        from products.models import CentralStock, StockMovement, BatchTransaction
+        from products.models import StockMovement, BatchTransaction, BatchAssignment
         
         try:
             # Only update stock if invoice is not in draft status
@@ -190,121 +190,191 @@ class InvoiceItem(models.Model):
             
             # If batch is specified, update batch stock
             if self.batch:
-                # Check batch availability
-                if quantity_change > 0:
-                    # Get ALL salesman's assignments for this batch and sum available quantities
-                    salesman_assignments = self.batch.assignments.filter(
-                        salesman=self.invoice.salesman,
-                        status__in=['delivered', 'partial']
-                    )
-                    
-                    if not salesman_assignments.exists():
-                        raise ValueError(f"Salesman doesn't have access to batch {self.batch.batch_number}")
-                    
-                    # Sum all available quantities across assignments
-                    total_available_qty = sum(assignment.outstanding_quantity for assignment in salesman_assignments)
-                    if total_available_qty < quantity_change:
-                        raise ValueError(f"Insufficient batch stock. Available: {total_available_qty}, Required: {quantity_change}")
+                # For sales, we need to track which salesman sold from which batch
+                # Find salesman's batch assignments for this batch
+                assignments = BatchAssignment.objects.filter(
+                    batch=self.batch,
+                    salesman=self.invoice.salesman,
+                    status__in=['delivered', 'partial']
+                ).order_by('created_at')
                 
-                    # Update batch assignments using FIFO (reduce from assignments in order)
-                    remaining_to_reduce = quantity_change
-                    for assignment in salesman_assignments.order_by('created_at'):
-                        if remaining_to_reduce <= 0:
+                if not assignments.exists():
+                    raise ValueError(f"Salesman doesn't have access to batch {self.batch.batch_number}")
+                
+                # Calculate total available for sale
+                total_available_qty = sum(assignment.outstanding_quantity for assignment in assignments)
+                if quantity_change > 0 and total_available_qty < quantity_change:
+                    raise ValueError(f"Insufficient batch stock. Available: {total_available_qty}, Required: {quantity_change}")
+                
+                # For sales (positive quantity_change), mark as "sold" by increasing returned_quantity
+                # This represents the product leaving the salesman's possession through sale
+                if quantity_change > 0:
+                    remaining_to_sell = quantity_change
+                    for assignment in assignments:
+                        if remaining_to_sell <= 0:
                             break
                         
                         available_in_assignment = assignment.outstanding_quantity
-                        to_reduce = min(remaining_to_reduce, available_in_assignment)
-                        
-                        if to_reduce > 0:
-                            # For salesman sales, increase returned_quantity to reflect sold products
-                            assignment.returned_quantity += to_reduce
+                        if available_in_assignment > 0:
+                            to_sell = min(remaining_to_sell, available_in_assignment)
+                            
+                            # Increase returned_quantity to represent sold products
+                            assignment.returned_quantity += to_sell
+                            
+                            # Update assignment status
+                            if assignment.returned_quantity >= assignment.delivered_quantity:
+                                assignment.status = 'returned'
+                            elif assignment.returned_quantity > 0:
+                                assignment.status = 'partial'
+                            
                             assignment.save()
-                            remaining_to_reduce -= to_reduce
+                            remaining_to_sell -= to_sell
                 
-                # For salesman sales, only update assignment quantities, not batch current_quantity
-                # The batch current_quantity should only be updated for owner direct sales
-                # Create batch transaction record (but don't update batch.current_quantity for salesman sales)
+                # Create batch transaction record for the sale
                 BatchTransaction.objects.create(
                     batch=self.batch,
-                    transaction_type='salesman_sale',
+                    transaction_type='sale',
                     quantity=-quantity_change if quantity_change > 0 else abs(quantity_change),
-                    balance_after=self.batch.current_quantity,  # Keep current balance, don't change it
+                    balance_after=self.batch.current_quantity,  # Batch quantity doesn't change for salesman sales
                     reference_type='invoice_item',
                     reference_id=self.id,
-                    notes=f"Salesman sale to {self.invoice.shop.name}",
+                    notes=f"Sale to {self.invoice.shop.name} by {self.invoice.salesman.user.get_full_name()}",
                     created_by=self.invoice.created_by
                 )
-            
-            # Also update the original centralized stock system
-            try:
-                salesman_stock = CentralStock.objects.get(
-                    product=self.product,
-                    location_type='salesman',
-                    location_id=self.invoice.salesman.id
-                )
-                
-                # Check if salesman has enough stock (if not using batch system)
-                if not self.batch and quantity_change > 0 and salesman_stock.quantity < quantity_change:
-                    raise ValueError(f"Insufficient stock for {self.product.name}. Available: {salesman_stock.quantity}, Required: {quantity_change}")
-                
-                # Update salesman stock
+            else:
+                # If no batch specified, we need to allocate from available batches using FIFO
                 if quantity_change > 0:
-                    salesman_stock.quantity -= quantity_change
-                else:
-                    salesman_stock.quantity += abs(quantity_change)
-                
-                salesman_stock.save()
-                
-                # Create stock movement record
-                StockMovement.objects.create(
-                    product=self.product,
-                    salesman=self.invoice.salesman,
-                    movement_type='sale',
-                    quantity=-quantity_change if quantity_change > 0 else abs(quantity_change),
-                    notes=f"Invoice {self.invoice.invoice_number} - {self.invoice.shop.name}",
-                    reference_id=self.invoice.id,
-                    created_by=self.invoice.created_by
-                )
-                
-            except CentralStock.DoesNotExist:
-                if not self.batch:
-                    raise ValueError(f"No stock record found for {self.product.name} with salesman {self.invoice.salesman.user.get_full_name()}")
+                    self._allocate_from_available_batches(quantity_change)
+            
+            # Create stock movement record for audit
+            StockMovement.objects.create(
+                product=self.product,
+                salesman=self.invoice.salesman,
+                movement_type='sale',
+                quantity=-quantity_change if quantity_change > 0 else abs(quantity_change),
+                notes=f"Invoice {self.invoice.invoice_number} - {self.invoice.shop.name}",
+                reference_id=self.invoice.invoice_number,
+                created_by=self.invoice.created_by
+            )
                 
         except Exception as e:
             raise ValueError(f"Stock update failed: {str(e)}")
     
+    def _allocate_from_available_batches(self, quantity_needed):
+        """Allocate stock from salesman's available batches using FIFO"""
+        from products.models import BatchAssignment
+        
+        # Get salesman's available batch assignments ordered by FIFO
+        assignments = BatchAssignment.objects.filter(
+            batch__product=self.product,
+            salesman=self.invoice.salesman,
+            status__in=['delivered', 'partial']
+        ).filter(
+            delivered_quantity__gt=models.F('returned_quantity')
+        ).order_by('batch__manufacturing_date', 'batch__expiry_date', 'created_at')
+        
+        total_available = sum(assignment.outstanding_quantity for assignment in assignments)
+        if total_available < quantity_needed:
+            raise ValueError(f"Insufficient stock for {self.product.name}. Available: {total_available}, Required: {quantity_needed}")
+        
+        remaining_to_allocate = quantity_needed
+        
+        for assignment in assignments:
+            if remaining_to_allocate <= 0:
+                break
+            
+            available_in_assignment = assignment.outstanding_quantity
+            if available_in_assignment > 0:
+                to_allocate = min(available_in_assignment, remaining_to_allocate)
+                
+                # Update assignment (increase returned_quantity to represent sale)
+                assignment.returned_quantity += to_allocate
+                
+                # Update assignment status
+                if assignment.returned_quantity >= assignment.delivered_quantity:
+                    assignment.status = 'returned'
+                elif assignment.returned_quantity > 0:
+                    assignment.status = 'partial'
+                
+                assignment.save()
+                
+                # Set batch reference for this invoice item to the first allocated batch
+                if not self.batch:
+                    self.batch = assignment.batch
+                    self.save()
+                
+                # Create batch transaction
+                BatchTransaction.objects.create(
+                    batch=assignment.batch,
+                    transaction_type='sale',
+                    quantity=-to_allocate,
+                    balance_after=assignment.batch.current_quantity,
+                    reference_type='invoice_item',
+                    reference_id=self.id,
+                    notes=f"Auto-allocated sale to {self.invoice.shop.name}",
+                    created_by=self.invoice.created_by
+                )
+                
+                remaining_to_allocate -= to_allocate
+    
     def _restore_stock_quantities(self):
         """Restore stock quantities when invoice item is deleted"""
-        from products.models import CentralStock, StockMovement
+        from products.models import StockMovement, BatchTransaction, BatchAssignment
         
         try:
             # Only restore stock if invoice is not in draft status
             if self.invoice.status == 'draft':
                 return
             
-            # Restore salesman stock
-            try:
-                salesman_stock = CentralStock.objects.get(
-                    product=self.product,
-                    location_type='salesman',
-                    location_id=self.invoice.salesman.id
-                )
-                salesman_stock.quantity += self.quantity
-                salesman_stock.save()
-                
-                # Create stock movement record for salesman
-                StockMovement.objects.create(
-                    product=self.product,
-                    movement_type='return',
-                    quantity=self.quantity,  # Positive for inward movement
-                    reference_id=f"DEL-{self.invoice.invoice_number}",
+            if self.batch:
+                # Find the assignment that was reduced for this sale and restore it
+                assignments = BatchAssignment.objects.filter(
+                    batch=self.batch,
                     salesman=self.invoice.salesman,
-                    notes=f"Invoice item deleted: {self.invoice.invoice_number}",
+                    status__in=['partial', 'returned']
+                ).order_by('created_at')
+                
+                # Restore the quantity by reducing returned_quantity
+                remaining_to_restore = self.quantity
+                for assignment in assignments:
+                    if remaining_to_restore <= 0:
+                        break
+                    
+                    # Check how much we can restore from this assignment
+                    can_restore = min(assignment.returned_quantity, remaining_to_restore)
+                    if can_restore > 0:
+                        assignment.returned_quantity -= can_restore
+                        
+                        # Update assignment status
+                        if assignment.returned_quantity == 0:
+                            assignment.status = 'delivered'
+                        elif assignment.returned_quantity < assignment.delivered_quantity:
+                            assignment.status = 'partial'
+                        
+                        assignment.save()
+                        remaining_to_restore -= can_restore
+                
+                # Create reversal batch transaction
+                BatchTransaction.objects.create(
+                    batch=self.batch,
+                    transaction_type='return',
+                    quantity=self.quantity,
+                    balance_after=self.batch.current_quantity,
+                    reference_type='invoice_cancellation',
+                    reference_id=self.id,
+                    notes=f"Invoice item cancelled: {self.invoice.invoice_number}",
                     created_by=self.invoice.created_by
                 )
-                
-            except CentralStock.DoesNotExist:
-                pass  # If no stock record exists, nothing to restore
+            
+            # Create stock movement record for audit
+            StockMovement.objects.create(
+                product=self.product,
+                movement_type='return',
+                quantity=self.quantity,  # Positive for inward movement
+                salesman=self.invoice.salesman,
+                notes=f"Invoice item deleted: {self.invoice.invoice_number}",
+                created_by=self.invoice.created_by
+            )
             
         except Exception as e:
             print(f"Error restoring stock quantities: {e}")
@@ -415,12 +485,38 @@ class Return(models.Model):
     def _update_batch_stock(self):
         """Update batch stock when return is processed"""
         if self.approved and self.batch:
-            # Add returned quantity back to batch stock
-            self.batch.current_quantity += self.quantity
-            self.batch.save()
+            from products.models import BatchTransaction, BatchAssignment
+            
+            # For returns, we need to restore the stock to the salesman's batch assignment
+            # Find the salesman's assignment for this batch
+            try:
+                assignment = BatchAssignment.objects.filter(
+                    batch=self.batch,
+                    salesman=self.original_invoice.salesman,
+                    status__in=['partial', 'returned']
+                ).first()
+                
+                if assignment:
+                    # Restore the stock by reducing returned_quantity
+                    assignment.returned_quantity = max(0, assignment.returned_quantity - self.quantity)
+                    
+                    # Update assignment status
+                    if assignment.returned_quantity == 0:
+                        assignment.status = 'delivered'
+                    elif assignment.returned_quantity < assignment.delivered_quantity:
+                        assignment.status = 'partial'
+                    
+                    assignment.save()
+                else:
+                    # If no assignment found, the stock returns to general batch inventory
+                    self.batch.current_quantity += self.quantity
+                    self.batch.save()
+            except Exception:
+                # Fallback: add back to batch inventory
+                self.batch.current_quantity += self.quantity
+                self.batch.save()
             
             # Create batch transaction record
-            from products.models import BatchTransaction
             BatchTransaction.objects.create(
                 batch=self.batch,
                 transaction_type='return',
@@ -428,7 +524,7 @@ class Return(models.Model):
                 balance_after=self.batch.current_quantity,
                 reference_type='return',
                 reference_id=self.id,
-                notes=f"Return: {self.return_number} - {self.reason}",
+                notes=f"Customer return: {self.return_number} - {self.reason}",
                 created_by=self.created_by
             )
     

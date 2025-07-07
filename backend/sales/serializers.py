@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.db import models
 from decimal import Decimal
 from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment, Commission
-from products.models import Product, CentralStock
+from products.models import Product, Batch, BatchAssignment, StockMovement
 
 User = get_user_model()
 
@@ -121,20 +121,20 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
                         f"Insufficient stock. Available: {available_qty}, Requested: {quantity}"
                     )
             
-            # For owners/developers, check against owner stock in CentralStock
+            # For owners/developers, check against available batches
             elif request and request.user.role in ['owner', 'developer']:
-                try:
-                    owner_stock = CentralStock.objects.get(
-                        product=product,
-                        location_type='owner'
-                    )
-                    if quantity > owner_stock.quantity:
-                        raise serializers.ValidationError(
-                            f"Insufficient owner stock. Available: {owner_stock.quantity}, Requested: {quantity}"
-                        )
-                except CentralStock.DoesNotExist:
+                # Check total available stock from all batches
+                available_batches = Batch.objects.filter(
+                    product=product,
+                    is_active=True,
+                    current_quantity__gt=0
+                ).order_by('manufacturing_date', 'expiry_date')
+                
+                total_available = sum(batch.current_quantity for batch in available_batches)
+                
+                if quantity > total_available:
                     raise serializers.ValidationError(
-                        f"No owner stock available for product {product.name}"
+                        f"Insufficient stock. Available: {total_available}, Requested: {quantity}"
                     )
         
         return data
@@ -239,24 +239,17 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
             
             # Handle stock reduction based on user role
             if request and request.user.role in ['owner', 'developer']:
-                # For owners, reduce owner stock in CentralStock
+                # For owners, reduce stock using product's reduce_stock method (FIFO)
                 product = invoice_item.product
                 try:
-                    owner_stock = CentralStock.objects.get(
-                        product=product,
-                        location_type='owner'
+                    product.reduce_stock(
+                        quantity=invoice_item.quantity,
+                        user=request.user if request else None,
+                        notes=f'Sale via invoice {invoice.invoice_number}',
+                        movement_type='sale'
                     )
-                    if owner_stock.quantity >= invoice_item.quantity:
-                        owner_stock.quantity -= invoice_item.quantity
-                        owner_stock.save()
-                    else:
-                        raise serializers.ValidationError(
-                            f"Insufficient owner stock for {product.name}. Available: {owner_stock.quantity}"
-                        )
-                except CentralStock.DoesNotExist:
-                    raise serializers.ValidationError(
-                        f"No owner stock available for product {product.name}"
-                    )
+                except ValueError as e:
+                    raise serializers.ValidationError(str(e))
             
             # Create stock movement record for the sale
             if invoice.salesman:
@@ -921,4 +914,159 @@ class CommissionDashboardSerializer(serializers.Serializer):
     total_paid_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
     salesman_commissions = serializers.ListField()
     recent_commissions = CommissionSerializer(many=True)
+
+
+# Serializers for enhanced returns management with batch identification
+class BatchReturnCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating returns with mandatory batch identification"""
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    
+    class Meta:
+        model = Return
+        fields = [
+            'id', 'original_invoice', 'product', 'product_name', 'batch', 'batch_number',
+            'quantity', 'reason', 'return_amount', 'notes'
+        ]
+        read_only_fields = ['id', 'product_name', 'batch_number']
+    
+    def validate(self, data):
+        """Enhanced validation for batch-specific returns"""
+        batch = data.get('batch')
+        product = data.get('product')
+        quantity = data.get('quantity', 0)
+        original_invoice = data.get('original_invoice')
+        
+        # Batch is mandatory for returns
+        if not batch:
+            raise serializers.ValidationError("Batch identification is required for returns")
+        
+        # Ensure batch belongs to the product
+        if batch.product != product:
+            raise serializers.ValidationError(
+                f"Batch {batch.batch_number} does not belong to product {product.name}"
+            )
+        
+        # Check if there are sold items from this specific batch in the invoice
+        invoice_items_with_batch = InvoiceItem.objects.filter(
+            invoice=original_invoice,
+            product=product,
+            batch=batch
+        )
+        
+        if not invoice_items_with_batch.exists():
+            raise serializers.ValidationError(
+                f"No items from batch {batch.batch_number} were sold in invoice {original_invoice.invoice_number}"
+            )
+        
+        # Calculate total sold from this specific batch in this invoice
+        total_sold_from_batch = invoice_items_with_batch.aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+        
+        # Check existing returns from this batch for this invoice
+        existing_returns = Return.objects.filter(
+            original_invoice=original_invoice,
+            product=product,
+            batch=batch,
+            approved=True
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
+        
+        available_for_return = total_sold_from_batch - existing_returns
+        
+        if quantity > available_for_return:
+            raise serializers.ValidationError(
+                f"Cannot return {quantity} units. Only {available_for_return} units from batch {batch.batch_number} available for return"
+            )
+        
+        return data
+    
+    def create(self, validated_data):
+        """Create return and update batch quality metrics"""
+        request = self.context.get('request')
+        if request:
+            validated_data['created_by'] = request.user
+        
+        return_instance = super().create(validated_data)
+        
+        # Update batch return rate when return is created
+        if return_instance.batch:
+            return_instance.batch.update_return_rate()
+        
+        return return_instance
+
+
+class BatchReturnAnalyticsSerializer(serializers.Serializer):
+    """Serializer for batch return analytics"""
+    batch_id = serializers.IntegerField()
+    batch_number = serializers.CharField()
+    product_name = serializers.CharField()
+    total_produced = serializers.IntegerField()
+    total_sold = serializers.IntegerField()
+    total_returned = serializers.IntegerField()
+    return_rate = serializers.DecimalField(max_digits=5, decimal_places=2)
+    return_reasons = serializers.DictField()
+    quality_score = serializers.DecimalField(max_digits=5, decimal_places=2)
+    is_problematic = serializers.BooleanField()
+    defect_count = serializers.IntegerField()
+    manufacturing_date = serializers.DateField()
+    expiry_date = serializers.DateField()
+
+
+class ReturnAnalyticsSerializer(serializers.Serializer):
+    """Serializer for comprehensive return analytics"""
+    period = serializers.CharField()
+    total_returns = serializers.IntegerField()
+    total_return_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    return_rate_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    top_return_reasons = serializers.ListField()
+    problematic_batches = BatchReturnAnalyticsSerializer(many=True)
+    return_trends = serializers.ListField()
+    quality_alerts = serializers.ListField()
+
+
+class BatchDefectSerializer(serializers.Serializer):
+    """Serializer for batch defect reporting"""
+    batch_id = serializers.IntegerField()
+    defect_type = serializers.ChoiceField(choices=[
+        ('quality_issue', 'Quality Issue'),
+        ('contamination', 'Contamination'),
+        ('packaging_defect', 'Packaging Defect'),
+        ('expiry_issue', 'Expiry Issue'),
+        ('other', 'Other')
+    ])
+    severity = serializers.ChoiceField(choices=[
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical')
+    ])
+    description = serializers.CharField(max_length=1000)
+    reported_by_name = serializers.CharField(read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+
+
+class BatchRecallSerializer(serializers.Serializer):
+    """Serializer for batch recall operations"""
+    batch_id = serializers.IntegerField()
+    recall_reason = serializers.CharField(max_length=500)
+    severity = serializers.ChoiceField(choices=[
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical')
+    ])
+    recall_all_stock = serializers.BooleanField(default=True)
+    notify_customers = serializers.BooleanField(default=True)
+    
+    def validate_batch_id(self, value):
+        """Validate batch exists and is not already recalled"""
+        try:
+            from products.models import Batch
+            batch = Batch.objects.get(id=value)
+            if batch.recall_initiated_at:
+                raise serializers.ValidationError("This batch has already been recalled")
+            return value
+        except Batch.DoesNotExist:
+            raise serializers.ValidationError("Batch not found")
 

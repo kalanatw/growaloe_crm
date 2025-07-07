@@ -18,7 +18,7 @@ from .serializers import (
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
 from sales.models import Invoice, InvoiceItem, Transaction
-from products.models import Product, CentralStock
+from products.models import Product, Batch, BatchAssignment
 
 User = get_user_model()
 
@@ -187,11 +187,11 @@ class DashboardMetricsViewSet(viewsets.ModelViewSet):
         
         total_products = Product.objects.filter(is_active=True).count()
         
-        # Calculate total inventory value from CentralStock
+        # Calculate total inventory value from all active batches
         total_inventory_value = Decimal('0')
-        stocks = CentralStock.objects.select_related('product').all()
-        for stock in stocks:
-            total_inventory_value += stock.quantity * stock.product.cost_price
+        batches = Batch.objects.filter(is_active=True, current_quantity__gt=0).select_related('product')
+        for batch in batches:
+            total_inventory_value += batch.current_quantity * batch.unit_cost
         
         # Calculate outstanding amount
         outstanding_amount = Decimal('0')

@@ -17,10 +17,11 @@ from .serializers import (
     SalesPerformanceSerializer, InvoiceSettlementSerializer, 
     SettlementPaymentSerializer, MultiPaymentSettlementSerializer,
     BatchInvoiceCreateSerializer, AutoBatchInvoiceCreateSerializer,
-    CommissionSerializer, EnhancedReturnSerializer, EnhancedSettlementSerializer, UnsettledInvoicesSerializer
+    CommissionSerializer, EnhancedReturnSerializer, EnhancedSettlementSerializer, UnsettledInvoicesSerializer,
+    BatchReturnCreateSerializer, BatchReturnAnalyticsSerializer, ReturnAnalyticsSerializer
 )
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
-from products.models import CentralStock, StockMovement
+from products.models import StockMovement, BatchAssignment, Batch
 
 User = get_user_model()
 
@@ -1487,6 +1488,170 @@ class EnhancedReturnViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response(
                 {'error': f'Failed to get batch return summary: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def by_batch(self, request):
+        """Get all returns for a specific batch"""
+        try:
+            batch_id = request.query_params.get('batch_id')
+            if not batch_id:
+                return Response(
+                    {'error': 'batch_id parameter is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get all returns for the specific batch
+            returns = Return.objects.filter(batch_id=batch_id).select_related(
+                'original_invoice', 'product', 'batch', 'created_by', 'approved_by'
+            ).order_by('-created_at')
+            
+            serializer = EnhancedReturnSerializer(returns, many=True)
+            
+            # Calculate summary statistics
+            total_returned = returns.filter(approved=True).aggregate(
+                total=Sum('quantity')
+            )['total'] or 0
+            
+            total_return_amount = returns.filter(approved=True).aggregate(
+                total=Sum('return_amount')
+            )['total'] or Decimal('0')
+            
+            # Group by return reasons
+            return_reasons = returns.filter(approved=True).values('reason').annotate(
+                count=Count('id'),
+                total_quantity=Sum('quantity')
+            ).order_by('-count')
+            
+            return Response({
+                'returns': serializer.data,
+                'summary': {
+                    'total_returns': returns.count(),
+                    'approved_returns': returns.filter(approved=True).count(),
+                    'total_returned_quantity': total_returned,
+                    'total_return_amount': total_return_amount,
+                    'return_reasons': list(return_reasons)
+                }
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get returns for batch: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def analytics(self, request):
+        """Get comprehensive return analytics"""
+        try:
+            from products.models import Batch
+            from django.utils import timezone
+            from datetime import timedelta
+            
+            # Get date range parameters
+            days = int(request.query_params.get('days', 30))
+            end_date = timezone.now().date()
+            start_date = end_date - timedelta(days=days)
+            
+            # Overall return statistics
+            returns_in_period = Return.objects.filter(
+                created_at__date__gte=start_date,
+                created_at__date__lte=end_date,
+                approved=True
+            )
+            
+            total_returns = returns_in_period.count()
+            total_return_amount = returns_in_period.aggregate(
+                total=Sum('return_amount')
+            )['total'] or Decimal('0')
+            
+            # Calculate return rate
+            total_sales_in_period = InvoiceItem.objects.filter(
+                invoice__invoice_date__date__gte=start_date,
+                invoice__invoice_date__date__lte=end_date
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+            
+            return_rate = (total_returns / total_sales_in_period * 100) if total_sales_in_period > 0 else 0
+            
+            # Top return reasons
+            top_return_reasons = returns_in_period.values('reason').annotate(
+                count=Count('id'),
+                percentage=Count('id') * 100.0 / total_returns if total_returns > 0 else 0
+            ).order_by('-count')[:5]
+            
+            # Problematic batches (high return rates)
+            problematic_batches = Batch.objects.filter(
+                returns__created_at__date__gte=start_date,
+                returns__approved=True
+            ).annotate(
+                total_returned=Sum('returns__quantity'),
+                return_count=Count('returns')
+            ).filter(
+                total_returned__gt=0
+            ).order_by('-total_returned')[:10]
+            
+            batch_analytics = []
+            for batch in problematic_batches:
+                batch_analytics.append({
+                    'batch_id': batch.id,
+                    'batch_number': batch.batch_number,
+                    'product_name': batch.product.name,
+                    'total_produced': batch.initial_quantity,
+                    'total_sold': batch.initial_quantity - batch.current_quantity,
+                    'total_returned': batch.total_returned or 0,
+                    'return_rate': batch.return_rate or 0,
+                    'quality_score': batch.quality_score() if hasattr(batch, 'quality_score') else 0,
+                    'is_problematic': batch.is_problematic() if hasattr(batch, 'is_problematic') else False,
+                    'defect_count': getattr(batch, 'defect_count', 0),
+                    'manufacturing_date': batch.manufacturing_date,
+                    'expiry_date': batch.expiry_date,
+                })
+            
+            # Return trends (daily counts)
+            return_trends = []
+            current_date = start_date
+            while current_date <= end_date:
+                daily_returns = returns_in_period.filter(
+                    created_at__date=current_date
+                ).count()
+                return_trends.append({
+                    'date': current_date,
+                    'count': daily_returns
+                })
+                current_date += timedelta(days=1)
+            
+            # Quality alerts
+            quality_alerts = []
+            high_return_batches = Batch.objects.filter(
+                return_rate__gte=10  # 10% or higher return rate
+            ).select_related('product')[:5]
+            
+            for batch in high_return_batches:
+                quality_alerts.append({
+                    'type': 'high_return_rate',
+                    'batch_number': batch.batch_number,
+                    'product_name': batch.product.name,
+                    'return_rate': batch.return_rate,
+                    'message': f'Batch {batch.batch_number} has a high return rate of {batch.return_rate}%'
+                })
+            
+            analytics_data = {
+                'period': f'{days} days',
+                'total_returns': total_returns,
+                'total_return_amount': total_return_amount,
+                'return_rate_percentage': return_rate,
+                'top_return_reasons': list(top_return_reasons),
+                'problematic_batches': batch_analytics,
+                'return_trends': return_trends,
+                'quality_alerts': quality_alerts
+            }
+            
+            return Response(analytics_data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get return analytics: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

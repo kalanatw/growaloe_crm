@@ -620,3 +620,216 @@ export interface BatchStockSummary {
   total_value: number;
   low_stock_alert: boolean;
 }
+
+// Batch-related types for the new batch-centric system
+export interface Batch {
+  id: number;
+  batch_number: string;
+  product: number;
+  product_name: string;
+  product_sku: string;
+  manufacture_date?: string;
+  expiry_date?: string;
+  initial_quantity: number;
+  current_quantity: number;
+  sold_quantity: number;
+  returned_quantity: number;
+  allocated_quantity: number;
+  available_quantity: number;
+  cost_price: number;
+  selling_price: number;
+  supplier?: string;
+  location?: string;
+  status: 'AVAILABLE' | 'ALLOCATED' | 'SOLD' | 'EXPIRED' | 'RECALLED' | 'DEFECTIVE';
+  quality_status: 'GOOD' | 'DAMAGED' | 'EXPIRED' | 'RECALLED';
+  quality_notes?: string;
+  quality_check_date?: string;
+  quality_checked_by?: string;
+  recall_date?: string;
+  recall_reason?: string;
+  recall_batch_numbers?: string;
+  return_rate: number;
+  total_returned: number;
+  notes?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BatchDefect {
+  id: number;
+  batch: number;
+  batch_number: string;
+  defect_type: 'QUALITY' | 'PACKAGING' | 'EXPIRY' | 'DAMAGE' | 'CONTAMINATION' | 'OTHER';
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  description: string;
+  detected_date: string;
+  detected_by?: string;
+  action_taken?: string;
+  status: 'OPEN' | 'INVESTIGATING' | 'RESOLVED' | 'CLOSED';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BatchAllocation {
+  id: number;
+  batch: number;
+  batch_number: string;
+  salesman: number;
+  salesman_name: string;
+  quantity: number;
+  allocated_date: string;
+  status: 'ACTIVE' | 'PARTIAL' | 'COMPLETED' | 'CANCELLED';
+  notes?: string;
+  created_at: string;
+}
+
+export interface BatchMovement {
+  id: number;
+  batch: number;
+  batch_number: string;
+  movement_type: 'ALLOCATION' | 'SALE' | 'RETURN' | 'ADJUSTMENT' | 'TRANSFER';
+  quantity: number;
+  from_location?: string;
+  to_location?: string;
+  reference_id?: number;
+  reference_type?: string;
+  notes?: string;
+  created_by: number;
+  created_at: string;
+}
+
+export interface BatchReturn {
+  id: number;
+  batch: number;
+  batch_number: string;
+  product: number;
+  product_name: string;
+  invoice?: number;
+  invoice_number?: string;
+  shop?: number;
+  shop_name?: string;
+  salesman?: number;
+  salesman_name?: string;
+  quantity: number;
+  reason: 'DEFECTIVE' | 'EXPIRED' | 'DAMAGED' | 'WRONG_PRODUCT' | 'CUSTOMER_REQUEST' | 'OTHER';
+  condition: 'SELLABLE' | 'DAMAGED' | 'EXPIRED' | 'UNSELLABLE';
+  return_date: string;
+  description?: string;
+  action_taken?: 'REFUND' | 'REPLACE' | 'CREDIT' | 'DISPOSE' | 'RETURN_TO_SUPPLIER';
+  refund_amount?: number;
+  replacement_batch?: number;
+  notes?: string;
+  processed_by?: number;
+  processed_by_name?: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'PROCESSED';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BatchQualityCheck {
+  id: number;
+  batch: number;
+  batch_number: string;
+  check_type: 'INCOMING' | 'PERIODIC' | 'COMPLAINT' | 'RECALL';
+  status: 'PASS' | 'FAIL' | 'CONDITIONAL';
+  checked_date: string;
+  checked_by: string;
+  parameters_checked: string[];
+  results: Record<string, any>;
+  notes?: string;
+  next_check_date?: string;
+  created_at: string;
+}
+
+export interface BatchAnalytics {
+  batch_id: number;
+  batch_number: string;
+  product_name: string;
+  total_quantity: number;
+  sold_quantity: number;
+  returned_quantity: number;
+  return_rate: number;
+  revenue: number;
+  profit: number;
+  profit_margin: number;
+  days_in_inventory: number;
+  turnover_rate: number;
+  quality_score: number;
+  defect_count: number;
+  customer_complaints: number;
+  expiry_risk: boolean;
+  movement_history: BatchMovement[];
+}
+
+export interface BatchRecall {
+  id: number;
+  batch_numbers: string[];
+  product: number;
+  product_name: string;
+  recall_reason: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  initiated_date: string;
+  initiated_by: string;
+  affected_invoices: number[];
+  affected_shops: number[];
+  total_quantity_recalled: number;
+  status: 'INITIATED' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
+  completion_date?: string;
+  notes?: string;
+  regulatory_notification?: boolean;
+  media_notification?: boolean;
+  customer_notification_sent?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// Enhanced types for batch-centric invoice items
+export interface BatchInvoiceItem extends Omit<InvoiceItem, 'id'> {
+  id: number;
+  batch: number;
+  batch_number: string;
+  product: number | { id: number; name: string; sku: string; };
+  product_name: string;
+  product_sku: string;
+  quantity: number;
+  unit_price: number;
+  batch_cost_price: number;
+  batch_expiry_date?: string;
+  line_total: number;
+  salesman_margin: number;
+  shop_margin: number;
+}
+
+// Batch creation and form types
+export interface CreateBatchData {
+  product: number;
+  batch_number: string;
+  manufacturing_date?: string;
+  expiry_date?: string;
+  initial_quantity: number;
+  current_quantity?: number;
+  unit_cost: number;
+  supplier?: string;
+  location?: string;
+  notes?: string;
+  quality_status?: 'GOOD' | 'WARNING' | 'DEFECTIVE' | 'RECALLED';
+  is_active?: boolean;
+}
+
+export interface BatchFormErrors {
+  product?: string;
+  batch_number?: string;
+  initial_quantity?: string;
+  unit_cost?: string;
+  manufacturing_date?: string;
+  expiry_date?: string;
+  supplier?: string;
+  location?: string;
+  notes?: string;
+}
+
+export interface BatchValidationResponse {
+  is_available: boolean;
+  message: string;
+}
