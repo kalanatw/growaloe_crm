@@ -444,12 +444,12 @@ class Return(models.Model):
     """Product return model"""
     
     RETURN_REASONS = [
-        ('defective', 'Defective Product'),
-        ('wrong_item', 'Wrong Item'),
-        ('damaged', 'Damaged in Transit'),
-        ('expired', 'Expired Product'),
-        ('customer_request', 'Customer Request'),
-        ('other', 'Other'),
+        ('DEFECTIVE', 'Defective Product'),
+        ('EXPIRED', 'Expired Product'),
+        ('DAMAGED', 'Damaged in Transit'),
+        ('WRONG_PRODUCT', 'Wrong Product'),
+        ('CUSTOMER_REQUEST', 'Customer Request'),
+        ('OTHER', 'Other'),
     ]
     
     return_number = models.CharField(max_length=100, unique=True)

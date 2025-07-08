@@ -12,6 +12,7 @@ import {
   UserPlus,
   Receipt,
   Truck,
+  RotateCcw,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -28,6 +29,7 @@ const navigation = [
   { name: 'Invoice History', href: '/invoices', icon: FileText },
   { name: 'Shops', href: '/shops', icon: Users },
   { name: 'Invoice Settlement', href: '/invoice-settlement', icon: Receipt },
+  { name: 'Returns', href: '/returns', icon: RotateCcw },
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
 ];
 

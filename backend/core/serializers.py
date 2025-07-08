@@ -54,11 +54,10 @@ class InvoiceSettlementSerializer(serializers.ModelSerializer):
         model = InvoiceSettlement
         fields = [
             'id', 'invoice', 'invoice_number', 'shop_name', 'settlement_date',
-            'amount', 'payment_method', 'reference_number', 'bank_name',
-            'cheque_date', 'notes', 'created_by', 'created_by_name',
-            'created_at', 'updated_at'
+            'total_amount', 'notes', 'created_by', 'created_by_name',
+            'created_at'
         ]
-        read_only_fields = ['created_by', 'created_at', 'updated_at']
+        read_only_fields = ['created_by', 'created_at']
 
 
 class FinancialSummarySerializer(serializers.ModelSerializer):

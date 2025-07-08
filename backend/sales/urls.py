@@ -8,6 +8,7 @@ router.register(r'invoice-items', views.InvoiceItemViewSet)
 router.register(r'transactions', views.TransactionViewSet)
 router.register(r'commissions', views.CommissionViewSet)
 router.register(r'returns', views.EnhancedReturnViewSet)
+router.register(r'batch-returns', views.BatchReturnViewSet, basename='batchreturn')
 router.register(r'settlements', views.EnhancedSettlementViewSet)
 
 urlpatterns = [

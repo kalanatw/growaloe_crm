@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.db import models
 from decimal import Decimal
 from .models import Invoice, InvoiceItem, Transaction, Return, InvoiceSettlement, SettlementPayment, Commission
-from products.models import Product, Batch, BatchAssignment, StockMovement
+from products.models import Product, Batch, BatchAssignment, StockMovement, BatchTransaction
 
 User = get_user_model()
 
@@ -300,6 +300,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 class ReturnSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
     
@@ -307,12 +308,13 @@ class ReturnSerializer(serializers.ModelSerializer):
         model = Return
         fields = [
             'id', 'return_number', 'original_invoice', 'invoice_number', 'product', 'product_name',
-            'quantity', 'reason', 'return_amount', 'approved', 'approved_by', 'approved_by_name',
-            'created_by', 'created_by_name', 'notes', 'created_at', 'updated_at'
+            'batch', 'batch_number', 'quantity', 'reason', 'return_amount', 'approved', 
+            'approved_by', 'approved_by_name', 'created_by', 'created_by_name', 'notes', 
+            'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'return_number', 'created_at', 'updated_at', 'invoice_number', 'product_name', 
-            'created_by_name', 'approved_by_name'
+            'batch_number', 'created_by_name', 'approved_by_name'
         ]
     
     def validate(self, data):
@@ -339,7 +341,7 @@ class ReturnSerializer(serializers.ModelSerializer):
             original_invoice=invoice, 
             product=product,
             approved=True
-        ).aggregate(total=serializers.models.Sum('quantity'))['total'] or 0
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
         
         if existing_returns + quantity > invoice_item.quantity:
             raise serializers.ValidationError(
@@ -844,76 +846,327 @@ class EnhancedReturnSerializer(serializers.ModelSerializer):
 
 
 class BatchSearchSerializer(serializers.Serializer):
-    """Serializer for batch search autocomplete"""
-    id = serializers.IntegerField()
+    """Serializer for batch search functionality"""
+    batch_number = serializers.CharField(required=False)
+    product_id = serializers.IntegerField(required=False)
+    salesman_id = serializers.IntegerField(required=False)
+    
+    def validate(self, data):
+        if not data.get('batch_number') and not data.get('product_id'):
+            raise serializers.ValidationError("Either batch_number or product_id must be provided")
+        return data
+
+
+class BatchReturnSerializer(serializers.ModelSerializer):
+    """Enhanced Return serializer with batch-centric functionality"""
+    invoice_number = serializers.CharField(source='original_invoice.invoice_number', read_only=True)
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    batch_expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
+    shop_name = serializers.CharField(source='original_invoice.shop.name', read_only=True)
+    salesman_name = serializers.CharField(source='original_invoice.salesman.user.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True)
+    
+    class Meta:
+        model = Return
+        fields = [
+            'id', 'return_number', 'original_invoice', 'invoice_number', 'product', 'product_name',
+            'product_sku', 'batch', 'batch_number', 'batch_expiry_date', 'quantity', 'reason', 
+            'return_amount', 'approved', 'approved_by', 'approved_by_name', 'shop_name', 
+            'salesman_name', 'created_by', 'created_by_name', 'notes', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'return_number', 'created_at', 'updated_at', 'invoice_number', 'product_name', 
+            'product_sku', 'batch_number', 'batch_expiry_date', 'shop_name', 'salesman_name',
+            'created_by_name', 'approved_by_name'
+        ]
+    
+    def validate(self, data):
+        invoice = data.get('original_invoice')
+        product = data.get('product')
+        batch = data.get('batch')
+        quantity = data.get('quantity', 0)
+        
+        # Check if product was in the invoice
+        try:
+            invoice_item = InvoiceItem.objects.get(invoice=invoice, product=product)
+        except InvoiceItem.DoesNotExist:
+            raise serializers.ValidationError(
+                f"Product {product.name} was not in invoice {invoice.invoice_number}"
+            )
+        
+        # If batch is specified, validate batch was used in the invoice
+        if batch:
+            if invoice_item.batch != batch:
+                raise serializers.ValidationError(
+                    f"Batch {batch.batch_number} was not used in invoice {invoice.invoice_number} for product {product.name}"
+                )
+        
+        # Check if return quantity doesn't exceed purchased quantity
+        if quantity > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Return quantity ({quantity}) exceeds purchased quantity ({invoice_item.quantity})"
+            )
+        
+        # Check for existing returns for this specific batch and product
+        existing_returns_filter = {
+            'original_invoice': invoice,
+            'product': product,
+            'approved': True
+        }
+        if batch:
+            existing_returns_filter['batch'] = batch
+            
+        existing_returns = Return.objects.filter(**existing_returns_filter).aggregate(
+            total=models.Sum('quantity')
+        )['total'] or 0
+        
+        if existing_returns + quantity > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Total return quantity would exceed purchased quantity. "
+                f"Already returned: {existing_returns}, Requesting: {quantity}, "
+                f"Purchased: {invoice_item.quantity}"
+            )
+        
+        return data
+
+
+class BatchReturnCreateSerializer(serializers.Serializer):
+    """Serializer for creating returns during settlement - accepts IDs instead of objects"""
+    original_invoice = serializers.IntegerField()
+    product = serializers.IntegerField()
+    batch = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+    reason = serializers.ChoiceField(choices=[
+        'DEFECTIVE', 'EXPIRED', 'DAMAGED', 'WRONG_PRODUCT', 'CUSTOMER_REQUEST', 'OTHER'
+    ])
+    return_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate(self, data):
+        try:
+            # Convert IDs to actual model instances
+            invoice = Invoice.objects.get(id=data['original_invoice'])
+            product = Product.objects.get(id=data['product'])
+            batch = Batch.objects.get(id=data['batch'])
+            
+        except (Invoice.DoesNotExist, Product.DoesNotExist, Batch.DoesNotExist) as e:
+            raise serializers.ValidationError(f"Referenced object not found: {str(e)}")
+        
+        # Check if this batch was used in the invoice
+        try:
+            invoice_item = InvoiceItem.objects.get(
+                invoice=invoice,
+                product=product,
+                batch=batch
+            )
+        except InvoiceItem.DoesNotExist:
+            raise serializers.ValidationError(
+                f"This batch was not sold in the specified invoice"
+            )
+        
+        # Check if return quantity doesn't exceed purchased quantity
+        if data['quantity'] > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Return quantity ({data['quantity']}) exceeds purchased quantity ({invoice_item.quantity})"
+            )
+        
+        # Check for existing returns for this specific batch and product
+        existing_returns = Return.objects.filter(
+            original_invoice=invoice,
+            product=product,
+            batch=batch,
+            approved=True
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
+        
+        if existing_returns + data['quantity'] > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Total return quantity would exceed purchased quantity. "
+                f"Already returned: {existing_returns}, Requesting: {data['quantity']}, "
+                f"Purchased: {invoice_item.quantity}"
+            )
+        
+        # Store the actual objects for creation
+        data['_invoice'] = invoice
+        data['_product'] = product
+        data['_batch'] = batch
+        
+        return data
+    
+    def create(self, validated_data):
+        # Get the actual objects
+        invoice = validated_data.pop('_invoice')
+        product = validated_data.pop('_product')
+        batch = validated_data.pop('_batch')
+        
+        request = self.context.get('request')
+        user = request.user if request else None
+        
+        # Create the return with actual objects
+        return_obj = Return.objects.create(
+            original_invoice=invoice,
+            product=product,
+            batch=batch,
+            quantity=validated_data['quantity'],
+            reason=validated_data['reason'],
+            return_amount=validated_data['return_amount'],
+            notes=validated_data.get('notes', ''),
+            approved=True,  # Auto-approve for settlement
+            approved_by=user,
+            approved_at=timezone.now(),
+            created_by=user
+        )
+        
+        return return_obj
+    """Serializer for creating returns during settlement - accepts IDs instead of objects"""
+    original_invoice = serializers.IntegerField()
+    product = serializers.IntegerField()
+    batch = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+    reason = serializers.ChoiceField(choices=[
+        ('DEFECTIVE', 'Defective'),
+        ('EXPIRED', 'Expired'),
+        ('DAMAGED', 'Damaged'),
+        ('WRONG_PRODUCT', 'Wrong Product'),
+        ('CUSTOMER_REQUEST', 'Customer Request'),
+        ('OTHER', 'Other')
+    ])
+    return_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate(self, data):
+        try:
+            invoice = Invoice.objects.get(id=data['original_invoice'])
+            product = Product.objects.get(id=data['product'])
+            batch = Batch.objects.get(id=data['batch'])
+        except (Invoice.DoesNotExist, Product.DoesNotExist, Batch.DoesNotExist) as e:
+            raise serializers.ValidationError(f"Referenced object not found: {str(e)}")
+        
+        # Check if this exact batch was sold in the invoice
+        try:
+            invoice_item = InvoiceItem.objects.get(
+                invoice=invoice,
+                product=product,
+                batch=batch
+            )
+        except InvoiceItem.DoesNotExist:
+            raise serializers.ValidationError(
+                f"Batch {batch.batch_number} of product {product.name} was not sold in invoice {invoice.invoice_number}"
+            )
+        
+        # Check if return quantity doesn't exceed purchased quantity
+        if data['quantity'] > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Return quantity ({data['quantity']}) exceeds purchased quantity ({invoice_item.quantity})"
+            )
+        
+        # Check for existing returns for this specific batch and product
+        existing_returns = Return.objects.filter(
+            original_invoice=invoice,
+            product=product,
+            batch=batch,
+            approved=True
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
+        
+        if existing_returns + data['quantity'] > invoice_item.quantity:
+            raise serializers.ValidationError(
+                f"Total return quantity would exceed purchased quantity. "
+                f"Already returned: {existing_returns}, Requesting: {data['quantity']}, "
+                f"Purchased: {invoice_item.quantity}"
+            )
+        
+        # Store the actual objects for creation
+        data['_invoice'] = invoice
+        data['_product'] = product
+        data['_batch'] = batch
+        data['_invoice_item'] = invoice_item
+        
+        return data
+
+    def create(self, validated_data):
+        # Remove the helper objects
+        invoice = validated_data.pop('_invoice')
+        product = validated_data.pop('_product')
+        batch = validated_data.pop('_batch')
+        invoice_item = validated_data.pop('_invoice_item')
+        
+        # Create the return with actual objects
+        return Return.objects.create(
+            original_invoice=invoice,
+            product=product,
+            batch=batch,
+            quantity=validated_data['quantity'],
+            reason=validated_data['reason'],
+            return_amount=validated_data['return_amount'],
+            notes=validated_data.get('notes', ''),
+            approved=True,  # Auto-approve for settlement
+            approved_by=self.context['request'].user,
+            approved_at=timezone.now(),
+            created_by=self.context['request'].user
+        )
+
+
+class InvoiceSettlementWithReturnsSerializer(serializers.Serializer):
+    """Serializer for invoice settlement with returns support"""
+    invoice_id = serializers.IntegerField()
+    returns = BatchReturnCreateSerializer(many=True, required=False)
+    payments = SettlementPaymentSerializer(many=True, required=False)
+    settlement_notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate(self, data):
+        invoice_id = data.get('invoice_id')
+        returns = data.get('returns', [])
+        payments = data.get('payments', [])
+        
+        # Validate invoice exists
+        try:
+            invoice = Invoice.objects.get(id=invoice_id)
+        except Invoice.DoesNotExist:
+            raise serializers.ValidationError(f"Invoice with ID {invoice_id} not found")
+        
+        # Validate returns if provided
+        if returns:
+            for return_data in returns:
+                return_serializer = BatchReturnCreateSerializer(data=return_data, context=self.context)
+                if not return_serializer.is_valid():
+                    raise serializers.ValidationError(f"Invalid return data: {return_serializer.errors}")
+        
+        # Validate payments if provided
+        if payments:
+            total_payment = sum(Decimal(str(payment.get('amount', 0))) for payment in payments)
+            if total_payment > invoice.balance_due:
+                raise serializers.ValidationError(
+                    f"Total payment amount ({total_payment}) exceeds balance due ({invoice.balance_due})"
+                )
+        
+        return data
+
+
+class BatchTraceabilitySerializer(serializers.Serializer):
+    """Serializer for batch traceability data"""
+    batch_id = serializers.IntegerField()
     batch_number = serializers.CharField()
     product_name = serializers.CharField()
-    current_quantity = serializers.IntegerField()
-    expiry_date = serializers.DateField()
+    product_sku = serializers.CharField()
     manufacturing_date = serializers.DateField()
-
-
-class UnsettledInvoicesSerializer(serializers.ModelSerializer):
-    """Serializer for showing unsettled invoices for bill-to-bill settlement"""
-    outstanding_amount = serializers.SerializerMethodField()
+    expiry_date = serializers.DateField()
+    initial_quantity = serializers.IntegerField()
+    current_quantity = serializers.IntegerField()
     
-    class Meta:
-        model = Invoice
-        fields = [
-            'id', 'invoice_number', 'invoice_date', 'net_total', 
-            'paid_amount', 'balance_due', 'outstanding_amount'
-        ]
+    # Sales data
+    total_sold = serializers.IntegerField()
+    total_returned = serializers.IntegerField()
+    shops_sold_to = serializers.ListField(child=serializers.DictField())
+    shops_returned_from = serializers.ListField(child=serializers.DictField())
     
-    def get_outstanding_amount(self, obj):
-        return obj.balance_due
-
-
-class EnhancedSettlementSerializer(serializers.ModelSerializer):
-    """Enhanced settlement serializer with bill-to-bill support"""
-    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
-    shop_name = serializers.CharField(source='invoice.shop.name', read_only=True)
-    payments = serializers.SerializerMethodField()
-    unsettled_invoices_total = serializers.SerializerMethodField()
+    # Salesmen data
+    salesmen_assigned = serializers.ListField(child=serializers.DictField())
     
-    class Meta:
-        model = InvoiceSettlement
-        fields = [
-            'id', 'invoice', 'invoice_number', 'shop_name', 'settlement_date',
-            'total_amount', 'unsettled_invoices_total', 'payments', 'notes', 'created_by'
-        ]
-        read_only_fields = ['id', 'invoice_number', 'shop_name', 'unsettled_invoices_total', 'payments']
-    
-    def get_payments(self, obj):
-        payments = SettlementPayment.objects.filter(settlement=obj)
-        return SettlementPaymentSerializer(payments, many=True).data
-    
-    def get_unsettled_invoices_total(self, obj):
-        """Get total amount of unsettled invoices for the same shop"""
-        unsettled_invoices = Invoice.objects.filter(
-            shop=obj.invoice.shop,
-            balance_due__gt=0
-        ).exclude(id=obj.invoice.id)
-        
-        return sum(invoice.balance_due for invoice in unsettled_invoices)
-
-
-class SettlementPaymentSerializer(serializers.ModelSerializer):
-    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
-    
-    class Meta:
-        model = SettlementPayment
-        fields = [
-            'id', 'payment_method', 'payment_method_display', 'amount',
-            'reference_number', 'bank_name', 'cheque_date', 'notes'
-        ]
-
-
-class CommissionDashboardSerializer(serializers.Serializer):
-    """Serializer for commission dashboard data"""
-    total_pending_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_paid_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
-    salesman_commissions = serializers.ListField()
-    recent_commissions = CommissionSerializer(many=True)
+    # Quality data
+    quality_status = serializers.CharField()
+    return_rate = serializers.DecimalField(max_digits=5, decimal_places=2)
 
 
 # Serializers for enhanced returns management with batch identification
@@ -996,33 +1249,52 @@ class BatchReturnCreateSerializer(serializers.ModelSerializer):
         return return_instance
 
 
-class BatchReturnAnalyticsSerializer(serializers.Serializer):
-    """Serializer for batch return analytics"""
-    batch_id = serializers.IntegerField()
-    batch_number = serializers.CharField()
-    product_name = serializers.CharField()
-    total_produced = serializers.IntegerField()
-    total_sold = serializers.IntegerField()
-    total_returned = serializers.IntegerField()
-    return_rate = serializers.DecimalField(max_digits=5, decimal_places=2)
-    return_reasons = serializers.DictField()
-    quality_score = serializers.DecimalField(max_digits=5, decimal_places=2)
-    is_problematic = serializers.BooleanField()
-    defect_count = serializers.IntegerField()
-    manufacturing_date = serializers.DateField()
-    expiry_date = serializers.DateField()
+class CommissionDashboardSerializer(serializers.Serializer):
+    """Serializer for commission dashboard data"""
+    total_pending_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_paid_commissions = serializers.DecimalField(max_digits=12, decimal_places=2)
+    salesman_commissions = serializers.ListField()
+    recent_commissions = CommissionSerializer(many=True)
 
 
-class ReturnAnalyticsSerializer(serializers.Serializer):
-    """Serializer for comprehensive return analytics"""
-    period = serializers.CharField()
-    total_returns = serializers.IntegerField()
-    total_return_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
-    return_rate_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
-    top_return_reasons = serializers.ListField()
-    problematic_batches = BatchReturnAnalyticsSerializer(many=True)
-    return_trends = serializers.ListField()
-    quality_alerts = serializers.ListField()
+class EnhancedSettlementSerializer(serializers.ModelSerializer):
+    """Enhanced settlement serializer with bill-to-bill support"""
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True)
+    shop_name = serializers.CharField(source='invoice.shop.name', read_only=True)
+    payments = serializers.SerializerMethodField()
+    unsettled_invoices_total = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = InvoiceSettlement
+        fields = [
+            'id', 'invoice', 'invoice_number', 'shop_name', 'settlement_date',
+            'total_amount', 'unsettled_invoices_total', 'payments', 'notes', 'created_by'
+        ]
+        read_only_fields = ['id', 'invoice_number', 'shop_name', 'unsettled_invoices_total', 'payments']
+    
+    def get_payments(self, obj):
+        payments = SettlementPayment.objects.filter(settlement=obj)
+        return SettlementPaymentSerializer(payments, many=True).data
+    
+    def get_unsettled_invoices_total(self, obj):
+        """Get total amount of unsettled invoices for the same shop"""
+        unsettled_invoices = Invoice.objects.filter(
+            shop=obj.invoice.shop,
+            balance_due__gt=0
+        ).exclude(id=obj.invoice.id)
+        
+        return sum(invoice.balance_due for invoice in unsettled_invoices)
+
+
+class SettlementPaymentSerializer(serializers.ModelSerializer):
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    
+    class Meta:
+        model = SettlementPayment
+        fields = [
+            'id', 'payment_method', 'payment_method_display', 'amount',
+            'reference_number', 'bank_name', 'cheque_date', 'notes'
+        ]
 
 
 class BatchDefectSerializer(serializers.Serializer):

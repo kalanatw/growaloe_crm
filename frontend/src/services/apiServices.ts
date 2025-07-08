@@ -159,6 +159,10 @@ export const invoiceService = {
     return apiClient.get<Invoice>(`/sales/invoices/${id}/`);
   },
 
+  getInvoiceItems: async (invoiceId: number): Promise<any[]> => {
+    return apiClient.get<any[]>(`/sales/invoice-items/?invoice=${invoiceId}`);
+  },
+
   createInvoice: async (data: CreateInvoiceData): Promise<Invoice> => {
     return apiClient.post<Invoice>('/sales/invoices/', data);
   },
