@@ -60,6 +60,58 @@ interface BatchInfo {
   shops_sold_to: any[];
 }
 
+interface BatchSaleSummary {
+  shop_id: number;
+  shop_name: string;
+  invoice_id: number;
+  invoice_number: string;
+  quantity_sold: number;
+  unit_price: number;
+  salesman_name: string;
+  sale_date: string;
+}
+
+interface BatchReturnSummary {
+  shop_id: number;
+  shop_name: string;
+  return_id: number;
+  return_number: string;
+  quantity_returned: number;
+  return_amount: number;
+  reason: string;
+  return_date: string;
+}
+
+interface SalesmanAssignment {
+  salesman_id: number;
+  salesman_name: string;
+  assigned_quantity: number;
+  delivered_quantity: number;
+  returned_quantity: number;
+  outstanding_quantity: number;
+  assignment_date: string;
+  status: string;
+}
+
+interface BatchTraceability {
+  batch_id: number;
+  batch_number: string;
+  product_name: string;
+  product_sku: string;
+  manufacturing_date: string;
+  expiry_date: string | null;
+  initial_quantity: number;
+  current_quantity: number;
+  total_sold: number;
+  total_returned: number;
+  shops_sold_to: BatchSaleSummary[];
+  shops_returned_from: BatchReturnSummary[];
+  salesmen_assigned: SalesmanAssignment[];
+  quality_status: string;
+  return_rate: number;
+  is_expired: boolean;
+}
+
 interface ReturnsAnalytics {
   total_returns: number;
   total_return_amount: number;
@@ -109,7 +161,7 @@ export const ReturnsPage: React.FC = () => {
   const [selectedReturn, setSelectedReturn] = useState<BatchReturn | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<BatchInfo | null>(null);
   const [batchSearchResults, setBatchSearchResults] = useState<BatchInfo[]>([]);
-  const [traceabilityData, setTraceabilityData] = useState<any>(null);
+  const [traceabilityData, setTraceabilityData] = useState<BatchTraceability | null>(null);
   
   // View states
   const [activeTab, setActiveTab] = useState<'returns' | 'search' | 'analytics'>('returns');
@@ -682,7 +734,219 @@ export const ReturnsPage: React.FC = () => {
         )}
       </div>
 
-      {/* Modals would go here - BatchSearchModal, TraceabilityModal, ReturnModal, etc. */}
+      {/* Batch Traceability Modal */}
+      {isTraceabilityModalOpen && traceabilityData && (
+        <div className="fixed inset-0 z-50 overflow-y-auto">
+          <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div className="fixed inset-0 transition-opacity" aria-hidden="true">
+              <div className="absolute inset-0 bg-gray-500 opacity-75"></div>
+            </div>
+
+            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-4xl sm:w-full max-h-[90vh] overflow-y-auto">
+              <div className="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center">
+                    <InformationCircleIcon className="h-6 w-6 text-blue-600 mr-2" />
+                    <h3 className="text-lg font-medium text-gray-900 dark:text-white">
+                      Batch Traceability - {traceabilityData.batch_number}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsTraceabilityModalOpen(false)}
+                    className="text-gray-400 hover:text-gray-600 dark:text-gray-300 dark:hover:text-white"
+                  >
+                    <XCircleIcon className="h-5 w-5" />
+                  </button>
+                </div>
+                
+                {loading ? (
+                  <div className="flex justify-center p-6">
+                    <LoadingSpinner size="md" />
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {/* Batch Details */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="bg-gray-50 p-4 rounded-lg">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">Batch Information</h4>
+                        <div className="space-y-1 text-sm">
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Product:</span>
+                            <span className="font-medium text-gray-900">{traceabilityData.product_name} ({traceabilityData.product_sku})</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Manufactured:</span>
+                            <span className="font-medium">{formatDate(traceabilityData.manufacturing_date)}</span>
+                          </div>
+                          {traceabilityData.expiry_date && (
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Expires:</span>
+                              <span className="font-medium">{formatDate(traceabilityData.expiry_date)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Quality Status:</span>
+                            <span className={`font-medium ${
+                              traceabilityData.quality_status === 'GOOD' 
+                                ? 'text-green-600' 
+                                : traceabilityData.quality_status === 'WARNING'
+                                  ? 'text-yellow-600'
+                                  : 'text-red-600'
+                            }`}>{traceabilityData.quality_status}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-gray-50 p-4 rounded-lg">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">Quantity Summary</h4>
+                        <div className="space-y-1 text-sm">
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Initial Quantity:</span>
+                            <span className="font-medium">{traceabilityData.initial_quantity}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Current Quantity:</span>
+                            <span className="font-medium">{traceabilityData.current_quantity}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Total Sold:</span>
+                            <span className="font-medium">{traceabilityData.total_sold}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-gray-600">Total Returned:</span>
+                            <span className="font-medium">{traceabilityData.total_returned}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Shops Sold To - Main Focus */}
+                    <div className="bg-gray-50 p-4 rounded-lg">
+                      <h4 className="text-sm font-semibold text-gray-700 mb-3">Shops Sold To</h4>
+                      {traceabilityData.shops_sold_to.length > 0 ? (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shop</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Salesman</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {traceabilityData.shops_sold_to.map((sale: BatchSaleSummary, index: number) => (
+                                <tr key={`${sale.invoice_id}-${index}`} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{sale.shop_name}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{sale.invoice_number}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{formatDate(sale.sale_date)}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{sale.salesman_name}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs font-medium">{sale.quantity_sold}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{formatCurrency(sale.unit_price)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-gray-500">No sales found for this batch.</p>
+                      )}
+                    </div>
+
+                    {/* Shops Returned From */}
+                    {traceabilityData.shops_returned_from && traceabilityData.shops_returned_from.length > 0 && (
+                      <div className="bg-gray-50 p-4 rounded-lg">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-3">Returns History</h4>
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shop</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Return #</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {traceabilityData.shops_returned_from.map((returnItem: BatchReturnSummary) => (
+                                <tr key={returnItem.return_id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{returnItem.shop_name}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{returnItem.return_number}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{formatDate(returnItem.return_date)}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs font-medium">{returnItem.quantity_returned}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{formatCurrency(returnItem.return_amount)}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{returnItem.reason}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Salesmen Assigned */}
+                    {traceabilityData.salesmen_assigned && traceabilityData.salesmen_assigned.length > 0 && (
+                      <div className="bg-gray-50 p-4 rounded-lg">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-3">Salesmen Assignments</h4>
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Salesman</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Delivered</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Returned</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Outstanding</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {traceabilityData.salesmen_assigned.map((assignment: SalesmanAssignment) => (
+                                <tr key={assignment.salesman_id} className="hover:bg-gray-50">
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{assignment.salesman_name}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{assignment.assigned_quantity}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{assignment.delivered_quantity}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{assignment.returned_quantity}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">{assignment.outstanding_quantity}</td>
+                                  <td className="px-4 py-2 whitespace-nowrap text-xs">
+                                    <span className={`inline-block px-2 py-1 rounded-full text-xs ${
+                                      assignment.status === 'delivered' ? 'bg-green-100 text-green-800' :
+                                      assignment.status === 'partial' ? 'bg-yellow-100 text-yellow-800' :
+                                      assignment.status === 'pending' ? 'bg-blue-100 text-blue-800' :
+                                      'bg-gray-100 text-gray-800'
+                                    }`}>
+                                      {assignment.status}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                <button
+                  type="button"
+                  onClick={() => setIsTraceabilityModalOpen(false)}
+                  className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Other Modals - ReturnModal, etc. */}
     </Layout>
   );
 };
