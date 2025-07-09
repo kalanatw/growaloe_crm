@@ -16,6 +16,7 @@ import {
   financialTransactionService, 
   financialDashboardService 
 } from '../services/financialServices';
+import financeService, { DetailedProfitAnalysis, ProfitBreakdown } from '../services/financeService';
 import { 
   FinancialTransaction, 
   CreateFinancialTransactionData,
@@ -32,6 +33,8 @@ export const TransactionsPage: React.FC = () => {
   const [dashboard, setDashboard] = useState<FinancialDashboard | null>(null);
   const [bankBook, setBankBook] = useState<BankBookEntry[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
+  const [profitAnalysis, setProfitAnalysis] = useState<DetailedProfitAnalysis | null>(null);
+  const [selectedProfitView, setSelectedProfitView] = useState<'overview' | 'realized' | 'unrealized' | 'spendable'>('overview');
   const [loading, setLoading] = useState(true);
   const [showAddTransaction, setShowAddTransaction] = useState(false);
   const [transactionType, setTransactionType] = useState<'credit' | 'debit'>('credit');
@@ -39,7 +42,38 @@ export const TransactionsPage: React.FC = () => {
     date_from: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0],
     date_to: new Date().toISOString().split('T')[0]
   });
-  const [view, setView] = useState<'dashboard' | 'bankbook' | 'transactions'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'bankbook' | 'transactions' | 'profits'>('dashboard');
+
+  // Date range presets
+  const setDatePreset = (preset: 'today' | 'week' | 'month' | 'quarter') => {
+    const today = new Date();
+    let startDate: Date;
+    
+    switch (preset) {
+      case 'today':
+        startDate = new Date(today);
+        break;
+      case 'week':
+        startDate = new Date(today);
+        startDate.setDate(today.getDate() - 7);
+        break;
+      case 'month':
+        startDate = new Date(today);
+        startDate.setDate(today.getDate() - 30);
+        break;
+      case 'quarter':
+        startDate = new Date(today);
+        startDate.setDate(today.getDate() - 90);
+        break;
+      default:
+        startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+    }
+    
+    setDateRange({
+      date_from: startDate.toISOString().split('T')[0],
+      date_to: today.toISOString().split('T')[0]
+    });
+  };
 
   const {
     register,
@@ -53,7 +87,10 @@ export const TransactionsPage: React.FC = () => {
 
   useEffect(() => {
     loadFinancialData();
-  }, [dateRange]);
+    if (view === 'profits') {
+      loadProfitAnalysis();
+    }
+  }, [dateRange, view]);
 
   const loadFinancialData = async () => {
     try {
@@ -84,6 +121,16 @@ export const TransactionsPage: React.FC = () => {
     } catch (error) {
       console.error('Error loading transactions:', error);
       toast.error('Failed to load transactions');
+    }
+  };
+
+  const loadProfitAnalysis = async () => {
+    try {
+      const data = await financeService.getProfitBreakdown(dateRange.date_from, dateRange.date_to);
+      setProfitAnalysis(data);
+    } catch (error) {
+      console.error('Error loading profit analysis:', error);
+      toast.error('Failed to load profit analysis');
     }
   };
 
@@ -159,24 +206,54 @@ export const TransactionsPage: React.FC = () => {
         {/* Date Range and View Controls */}
         <div className="card p-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
-            <div className="flex items-center space-x-4">
-              <div>
-                <label className="label">From</label>
-                <input
-                  type="date"
-                  value={dateRange.date_from}
-                  onChange={(e) => setDateRange(prev => ({ ...prev, date_from: e.target.value }))}
-                  className="input"
-                />
+            <div className="flex flex-col space-y-4">
+              <div className="flex items-center space-x-4">
+                <div>
+                  <label className="label">From</label>
+                  <input
+                    type="date"
+                    value={dateRange.date_from}
+                    onChange={(e) => setDateRange(prev => ({ ...prev, date_from: e.target.value }))}
+                    className="input"
+                  />
+                </div>
+                <div>
+                  <label className="label">To</label>
+                  <input
+                    type="date"
+                    value={dateRange.date_to}
+                    onChange={(e) => setDateRange(prev => ({ ...prev, date_to: e.target.value }))}
+                    className="input"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="label">To</label>
-                <input
-                  type="date"
-                  value={dateRange.date_to}
-                  onChange={(e) => setDateRange(prev => ({ ...prev, date_to: e.target.value }))}
-                  className="input"
-                />
+              
+              {/* Date Presets */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setDatePreset('today')}
+                  className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
+                >
+                  Today
+                </button>
+                <button
+                  onClick={() => setDatePreset('week')}
+                  className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
+                >
+                  Past 7 Days
+                </button>
+                <button
+                  onClick={() => setDatePreset('month')}
+                  className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
+                >
+                  Past Month
+                </button>
+                <button
+                  onClick={() => setDatePreset('quarter')}
+                  className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-md transition-colors"
+                >
+                  Past Quarter
+                </button>
               </div>
             </div>
 
@@ -190,6 +267,19 @@ export const TransactionsPage: React.FC = () => {
                 }`}
               >
                 Dashboard
+              </button>
+              <button
+                onClick={() => {
+                  setView('profits');
+                  loadProfitAnalysis();
+                }}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  view === 'profits'
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                }`}
+              >
+                Profit Analysis
               </button>
               <button
                 onClick={() => setView('bankbook')}
@@ -460,6 +550,338 @@ export const TransactionsPage: React.FC = () => {
               </table>
             </div>
           </div>
+        )}
+
+        {/* Profit Analysis View */}
+        {view === 'profits' && profitAnalysis && (
+          <>
+            {/* Profit Analysis Navigation */}
+            <div className="card p-4">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setSelectedProfitView('overview')}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    selectedProfitView === 'overview'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                  }`}
+                >
+                  Overview
+                </button>
+                <button
+                  onClick={() => setSelectedProfitView('realized')}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    selectedProfitView === 'realized'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                  }`}
+                >
+                  Realized Profit
+                </button>
+                <button
+                  onClick={() => setSelectedProfitView('unrealized')}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    selectedProfitView === 'unrealized'
+                      ? 'bg-yellow-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                  }`}
+                >
+                  Unrealized Profit
+                </button>
+                <button
+                  onClick={() => setSelectedProfitView('spendable')}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    selectedProfitView === 'spendable'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300'
+                  }`}
+                >
+                  Spendable Profit
+                </button>
+              </div>
+            </div>
+
+            {/* Overview */}
+            {selectedProfitView === 'overview' && (
+              <>
+                {/* Profit Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="card p-6 border-l-4 border-green-500">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                          Realized Profit
+                        </p>
+                        <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                          {formatCurrency(profitAnalysis.realized.amount)}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Money already collected
+                        </p>
+                      </div>
+                      <div className="p-3 rounded-lg bg-green-100 dark:bg-green-900">
+                        <CurrencyDollarIcon className="h-6 w-6 text-green-600 dark:text-green-400" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card p-6 border-l-4 border-yellow-500">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                          Unrealized Profit
+                        </p>
+                        <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">
+                          {formatCurrency(profitAnalysis.unrealized.amount)}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Outstanding invoices
+                        </p>
+                      </div>
+                      <div className="p-3 rounded-lg bg-yellow-100 dark:bg-yellow-900">
+                        <DocumentTextIcon className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card p-6 border-l-4 border-blue-500">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                          Spendable Profit
+                        </p>
+                        <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                          {formatCurrency(profitAnalysis.spendable.amount)}
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Available to spend
+                        </p>
+                      </div>
+                      <div className="p-3 rounded-lg bg-blue-100 dark:bg-blue-900">
+                        <BanknotesIcon className="h-6 w-6 text-blue-600 dark:text-blue-400" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Business Performance Summary */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="card p-6">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                      Sales Performance
+                    </h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Total Sales:</span>
+                        <span className="font-semibold">{formatCurrency(profitAnalysis.summary.total_sales)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Total Collections:</span>
+                        <span className="font-semibold text-green-600">{formatCurrency(profitAnalysis.summary.total_collections)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600 dark:text-gray-400">Outstanding:</span>
+                        <span className="font-semibold text-yellow-600">{formatCurrency(profitAnalysis.summary.total_outstanding)}</span>
+                      </div>
+                      <div className="flex justify-between border-t pt-2">
+                        <span className="text-gray-900 dark:text-white font-semibold">Collection Efficiency:</span>
+                        <span className={`font-bold ${profitAnalysis.summary.collection_efficiency >= 0.8 ? 'text-green-600' : 'text-yellow-600'}`}>
+                          {(profitAnalysis.summary.collection_efficiency * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card p-6">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                      Profit Breakdown Formula
+                    </h3>
+                    <div className="space-y-3 text-sm">
+                      <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-lg">
+                        <p className="font-medium text-green-800 dark:text-green-200">Realized Profit</p>
+                        <p className="text-green-700 dark:text-green-300">= Invoice Collections - Commission Paid</p>
+                      </div>
+                      <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-lg">
+                        <p className="font-medium text-yellow-800 dark:text-yellow-200">Unrealized Profit</p>
+                        <p className="text-yellow-700 dark:text-yellow-300">= Outstanding Invoices - Pending Commissions</p>
+                      </div>
+                      <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg">
+                        <p className="font-medium text-blue-800 dark:text-blue-200">Spendable Profit</p>
+                        <p className="text-blue-700 dark:text-blue-300">= Recent Collections - Commission Reserve</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Detailed Breakdown Views */}
+            {selectedProfitView === 'realized' && (
+              <div className="card p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                      Realized Profit Breakdown
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Profit from collected invoices (money already in hand)
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                      {formatCurrency(profitAnalysis.realized.amount)}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Last updated: {new Date(profitAnalysis.realized.last_updated).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <h4 className="font-medium text-gray-900 dark:text-white">Components:</h4>
+                    {profitAnalysis.realized.components.collection_amount && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Invoice Collections:</span>
+                        <span className="font-semibold text-green-600">
+                          +{formatCurrency(profitAnalysis.realized.components.collection_amount)}
+                        </span>
+                      </div>
+                    )}
+                    {profitAnalysis.realized.components.pending_commissions && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Commission Paid:</span>
+                        <span className="font-semibold text-red-600">
+                          -{formatCurrency(profitAnalysis.realized.components.pending_commissions)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
+                    <h4 className="font-medium text-gray-900 dark:text-white mb-2">Calculation Details:</h4>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {profitAnalysis.realized.components.calculation_details || 
+                       "This represents the actual profit you've earned from invoices that have been paid, minus any commissions already disbursed to salespeople."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {selectedProfitView === 'unrealized' && (
+              <div className="card p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                      Unrealized Profit Breakdown
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Potential profit from outstanding invoices
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">
+                      {formatCurrency(profitAnalysis.unrealized.amount)}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Last updated: {new Date(profitAnalysis.unrealized.last_updated).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <h4 className="font-medium text-gray-900 dark:text-white">Components:</h4>
+                    {profitAnalysis.unrealized.components.outstanding_invoices && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Outstanding Invoices:</span>
+                        <span className="font-semibold text-yellow-600">
+                          +{formatCurrency(profitAnalysis.unrealized.components.outstanding_invoices)}
+                        </span>
+                      </div>
+                    )}
+                    {profitAnalysis.unrealized.components.pending_commissions && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Pending Commissions:</span>
+                        <span className="font-semibold text-red-600">
+                          -{formatCurrency(profitAnalysis.unrealized.components.pending_commissions)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
+                    <h4 className="font-medium text-gray-900 dark:text-white mb-2">Calculation Details:</h4>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {profitAnalysis.unrealized.components.calculation_details || 
+                       "This represents profit that will be realized when outstanding invoices are collected, minus the commissions that will need to be paid to salespeople."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {selectedProfitView === 'spendable' && (
+              <div className="card p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                      Spendable Profit Breakdown
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Cash available for business expenses and owner withdrawal
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                      {formatCurrency(profitAnalysis.spendable.amount)}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Last updated: {new Date(profitAnalysis.spendable.last_updated).toLocaleString()}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <h4 className="font-medium text-gray-900 dark:text-white">Components:</h4>
+                    {profitAnalysis.spendable.components.recent_collections && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Recent Collections:</span>
+                        <span className="font-semibold text-blue-600">
+                          +{formatCurrency(profitAnalysis.spendable.components.recent_collections)}
+                        </span>
+                      </div>
+                    )}
+                    {profitAnalysis.spendable.components.pending_commissions && (
+                      <div className="flex justify-between py-2 border-b border-gray-200 dark:border-gray-700">
+                        <span className="text-gray-600 dark:text-gray-400">Commission Reserve:</span>
+                        <span className="font-semibold text-red-600">
+                          -{formatCurrency(profitAnalysis.spendable.components.pending_commissions)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-lg">
+                    <h4 className="font-medium text-gray-900 dark:text-white mb-2">Calculation Details:</h4>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {profitAnalysis.spendable.components.calculation_details || 
+                       "This represents the cash you can safely spend on business operations or personal withdrawals, after setting aside money for pending commission payments."}
+                    </p>
+                    <div className="mt-3 p-3 bg-blue-100 dark:bg-blue-900/20 rounded-lg">
+                      <p className="text-sm font-medium text-blue-800 dark:text-blue-200">
+                        💡 Recommendation: This amount is safe to spend without affecting your ability to pay commissions.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Loading state for profits */}
+        {view === 'profits' && !profitAnalysis && (
+          <LoadingCard title="Loading profit analysis..." />
         )}
 
         {/* Transaction Modal */}

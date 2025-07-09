@@ -9,7 +9,6 @@ from decimal import Decimal
 from .models import FinancialTransaction, FinancialSummary
 from .serializers import FinancialTransactionSerializer, InvoiceSettlementSerializer, FinancialSummarySerializer
 from sales.models import Invoice, InvoiceSettlement
-from sales.models import Invoice, InvoiceSettlement
 from accounts.permissions import IsOwnerOrDeveloper
 
 
@@ -347,3 +346,175 @@ class FinancialDashboardView(viewsets.ViewSet):
             'entries': bank_entries,
             'final_balance': running_balance
         })
+
+
+class ProfitAnalysisViewSet(viewsets.ViewSet):
+    """
+    ViewSet for detailed profit analysis and breakdowns
+    """
+    permission_classes = [IsOwnerOrDeveloper]
+    
+    @action(detail=False, methods=['get'])
+    def profit_breakdown(self, request):
+        """Get comprehensive profit breakdown matching frontend requirements"""
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+        
+        if not start_date_str or not end_date_str:
+            today = timezone.now().date()
+            start_date = today.replace(day=1)
+            end_date = today
+        else:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+        
+        # Import models here to avoid circular imports
+        from sales.models import Invoice, InvoiceSettlement
+        
+        # Calculate Realized Profit components
+        realized_breakdown = self._get_realized_profit_breakdown(start_date, end_date)
+        
+        # Calculate Unrealized Profit components  
+        unrealized_breakdown = self._get_unrealized_profit_breakdown(start_date, end_date)
+        
+        # Calculate Spendable Profit
+        spendable_breakdown = self._get_spendable_profit_breakdown(
+            realized_breakdown['amount'], 
+            unrealized_breakdown['components']['outstanding_invoices']
+        )
+        
+        # Calculate summary metrics
+        total_sales = Invoice.objects.filter(
+            created_at__date__range=[start_date, end_date]
+        ).aggregate(total=Sum('net_total'))['total'] or Decimal('0.00')
+        
+        total_collections = InvoiceSettlement.objects.filter(
+            settlement_date__date__range=[start_date, end_date]
+        ).aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
+        
+        all_outstanding = Invoice.objects.filter(
+            balance_due__gt=0
+        ).aggregate(total=Sum('balance_due'))['total'] or Decimal('0.00')
+        
+        collection_efficiency = (total_collections / total_sales) if total_sales > 0 else 0
+        
+        return Response({
+            'realized': realized_breakdown,
+            'unrealized': unrealized_breakdown,
+            'spendable': spendable_breakdown,
+            'summary': {
+                'total_sales': float(total_sales),
+                'total_collections': float(total_collections),
+                'total_outstanding': float(all_outstanding),
+                'collection_efficiency': float(collection_efficiency)
+            },
+            'period': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat()
+            }
+        })
+    
+    def _get_realized_profit_breakdown(self, start_date, end_date):
+        """Calculate realized profit breakdown"""
+        from sales.models import Invoice, InvoiceSettlement
+        
+        # Cash from settled invoices
+        settlements = InvoiceSettlement.objects.filter(
+            settlement_date__date__range=[start_date, end_date]
+        ).select_related('invoice')
+        
+        cash_from_settlements = settlements.aggregate(
+            total=Sum('total_amount')
+        )['total'] or Decimal('0.00')
+        
+        # Commissions on settled invoices (assuming 5% commission rate for now)
+        # This should be calculated based on actual commission records when available
+        commissions_on_settled = cash_from_settlements * Decimal('0.05')
+        
+        # Additional income (financial transactions marked as income)
+        additional_income = FinancialTransaction.objects.filter(
+            date__range=[start_date, end_date],
+            transaction_type='income'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Expenses (financial transactions marked as expense)
+        expenses = FinancialTransaction.objects.filter(
+            date__range=[start_date, end_date],
+            transaction_type='expense'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        
+        # Calculate realized profit
+        realized_profit = cash_from_settlements - commissions_on_settled - expenses + additional_income
+        
+        return {
+            'type': 'realized',
+            'amount': float(realized_profit),
+            'components': {
+                'sales_revenue': float(cash_from_settlements),
+                'collection_amount': float(cash_from_settlements),
+                'pending_commissions': float(commissions_on_settled),
+                'recent_collections': float(cash_from_settlements),
+                'calculation_details': f'Collections: {cash_from_settlements} - Commissions: {commissions_on_settled} - Expenses: {expenses} + Other Income: {additional_income}'
+            },
+            'date_range': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat()
+            },
+            'last_updated': timezone.now().isoformat()
+        }
+    
+    def _get_unrealized_profit_breakdown(self, start_date, end_date):
+        """Calculate unrealized profit breakdown"""
+        from sales.models import Invoice
+        
+        # Outstanding invoices
+        outstanding_invoices = Invoice.objects.filter(
+            balance_due__gt=0
+        ).aggregate(total=Sum('balance_due'))['total'] or Decimal('0.00')
+        
+        # Estimated commissions on outstanding invoices
+        estimated_commissions = outstanding_invoices * Decimal('0.05')
+        
+        # Calculate unrealized profit
+        unrealized_profit = outstanding_invoices - estimated_commissions
+        
+        return {
+            'type': 'unrealized',
+            'amount': float(unrealized_profit),
+            'components': {
+                'outstanding_invoices': float(outstanding_invoices),
+                'pending_commissions': float(estimated_commissions),
+                'calculation_details': f'Outstanding: {outstanding_invoices} - Estimated Commissions: {estimated_commissions}'
+            },
+            'date_range': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat()
+            },
+            'last_updated': timezone.now().isoformat()
+        }
+    
+    def _get_spendable_profit_breakdown(self, realized_profit, outstanding_invoices):
+        """Calculate spendable profit breakdown"""
+        # Ensure we're working with Decimal types
+        realized_profit = Decimal(str(realized_profit))
+        outstanding_invoices = Decimal(str(outstanding_invoices))
+        
+        # Conservative approach: reserve 10% of outstanding invoices as risk buffer
+        risk_reserve = outstanding_invoices * Decimal('0.1')
+        commission_reserve = outstanding_invoices * Decimal('0.05')
+        spendable_profit = max(Decimal('0'), realized_profit - risk_reserve)
+        
+        return {
+            'type': 'spendable',
+            'amount': float(spendable_profit),
+            'components': {
+                'recent_collections': float(realized_profit),
+                'pending_commissions': float(commission_reserve),
+                'calculation_details': f'Realized Profit: {realized_profit} - Risk Reserve (10% of outstanding): {risk_reserve}'
+            },
+            'date_range': {
+                'start_date': timezone.now().date().isoformat(),
+                'end_date': timezone.now().date().isoformat()
+            },
+            'last_updated': timezone.now().isoformat()
+        }
