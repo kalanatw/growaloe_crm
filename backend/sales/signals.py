@@ -11,14 +11,13 @@ logger = logging.getLogger(__name__)
 @receiver(post_save, sender=Invoice)
 def create_commission(sender, instance, created, **kwargs):
     """
-    Automatically create commission when an invoice is created or updated
+    Create or update commission only when invoice is settled (paid or partial).
+    Remove commission if invoice is unpaid/cancelled.
     """
-    if instance.status != 'draft' and instance.net_total > 0:
-        # Calculate commission amount using Decimal arithmetic
+    from decimal import Decimal
+    if instance.status in ['paid', 'partial'] and instance.net_total > 0:
         commission_rate = Decimal('10.00')  # Default 10%
         commission_amount = (instance.net_total * commission_rate) / Decimal('100')
-        
-        # Create or update commission
         commission, commission_created = Commission.objects.get_or_create(
             invoice=instance,
             defaults={
@@ -29,12 +28,13 @@ def create_commission(sender, instance, created, **kwargs):
                 'status': 'pending'
             }
         )
-        
-        # If commission already exists, update the amounts
         if not commission_created:
             commission.invoice_amount = instance.net_total
             commission.commission_amount = (instance.net_total * commission.commission_rate) / Decimal('100')
             commission.save()
+    else:
+        # If invoice is not settled, remove commission if exists
+        Commission.objects.filter(invoice=instance).delete()
 
 
 @receiver(post_save, sender=InvoiceItem)

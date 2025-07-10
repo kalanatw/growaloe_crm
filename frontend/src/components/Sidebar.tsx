@@ -44,6 +44,7 @@ const ownerNavigation = [
   { name: 'Transactions', href: '/transactions', icon: CreditCard },
   { name: 'Manage Salesmen', href: '/salesmen', icon: UserPlus },
   { name: 'Product Deliveries', href: '/deliveries', icon: Truck },
+  { name: 'Commissions', href: '/commissions', icon: BarChart3 }, // Added commissions page
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {

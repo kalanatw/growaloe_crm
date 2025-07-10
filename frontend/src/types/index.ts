@@ -833,3 +833,15 @@ export interface BatchValidationResponse {
   is_available: boolean;
   message: string;
 }
+
+export interface Commission {
+  id: number;
+  invoice_number: string;
+  salesman_name: string;
+  shop_name: string;
+  commission_rate: string;
+  commission_amount: string;
+  status: string;
+  paid_date?: string;
+  payment_reference?: string;
+}

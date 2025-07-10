@@ -1412,6 +1412,35 @@ class CommissionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=False, methods=['post'], url_path='bulk_mark_paid')
+    def bulk_mark_paid(self, request):
+        """Bulk mark commissions as paid"""
+        commission_ids = request.data.get('commission_ids', [])
+        payment_reference = request.data.get('payment_reference', '')
+        user = request.user
+
+        if not commission_ids or not isinstance(commission_ids, list):
+            return Response({'error': 'commission_ids (list) is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Only allow owners/admins
+        if hasattr(user, 'role') and user.role == 'SALESMAN':
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+        updated_commissions = []
+        now = timezone.now()
+        for commission in Commission.objects.filter(id__in=commission_ids, status='pending'):
+            commission.status = 'paid'
+            commission.paid_date = now
+            commission.paid_by = user
+            commission.payment_reference = payment_reference
+            commission.save()
+            updated_commissions.append(commission)
+
+        return Response({
+            'message': f'{len(updated_commissions)} commissions marked as paid',
+            'commissions': CommissionSerializer(updated_commissions, many=True).data
+        })
+
 
 class EnhancedReturnViewSet(viewsets.ModelViewSet):
     """Enhanced ViewSet for managing product returns with batch support"""
