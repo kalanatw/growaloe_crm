@@ -42,6 +42,9 @@ COPY . .
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Create logs directory for Django logging
+RUN mkdir -p /app/backend/logs
+
 # Install Python dependencies
 WORKDIR /app/backend
 RUN pip install --upgrade pip \
