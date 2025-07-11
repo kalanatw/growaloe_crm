@@ -17,6 +17,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   BarChart,
+  Home, Truck, BarChart3, PlusCircle, RefreshCw,
 } from 'lucide-react';
 import { 
   productService, 
@@ -24,7 +25,7 @@ import {
   shopService, 
   analyticsService,
 } from '../services/apiServices';
-import { SalesmanStock, Invoice, Shop, MonthlyTrend, User } from '../types';
+import { SalesmanStock, Invoice, Shop, MonthlyTrend, User, TopProduct, StockSummaryItem } from '../types';
 import { format, subDays, startOfMonth, endOfMonth } from 'date-fns';
 import { formatCurrency } from '../utils/currency';
 import { getResponsiveFontSize, getCardAmountClass } from '../utils/responsiveFonts';
@@ -64,6 +65,14 @@ interface PerformanceMetrics {
   topSellingProduct?: string;
 }
 
+interface SalesmanAvailableProduct {
+  product_id: number;
+  product_name: string;
+  product_sku: string;
+  total_available_quantity: number;
+  unit: string;
+}
+
 export const DashboardPage: React.FC = () => {
   const { user } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -72,6 +81,11 @@ export const DashboardPage: React.FC = () => {
   const [recentInvoices, setRecentInvoices] = useState<Invoice[]>([]);
   const [monthlyTrends, setMonthlyTrends] = useState<MonthlyTrend[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [topShops, setTopShops] = useState<any[]>([]);
+  const [expandedShopId, setExpandedShopId] = useState<number | null>(null);
+  const [shopProducts, setShopProducts] = useState<{ [shopId: number]: { product_name: string; quantity: number }[] }>({});
+  const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
+  const [productStockSummary, setProductStockSummary] = useState<StockSummaryItem[]>([]);
 
   const isOwner = user?.role === 'owner';
   const isSalesman = user?.role === 'salesman';
@@ -102,21 +116,25 @@ export const DashboardPage: React.FC = () => {
   const loadOwnerDashboard = async () => {
     try {
       const [
-        stockData, 
-        invoicesData, 
-        shopsData, 
+        stockSummaryData,
+        invoicesData,
+        shopsData,
         commissionsData,
-        trendsData
+        trendsData,
+        salesPerformance,
+        analyticsData
       ] = await Promise.all([
-        productService.getMySalesmanStock().catch(() => ({ stocks: [] })),
+        productService.getProductStockSummary().then(res => res.results || []).catch(() => []),
         invoiceService.getInvoices({ ordering: '-created_at', page_size: 10 }),
         shopService.getShops(),
         fetchCommissionData(),
         analyticsService.getMonthlyTrends().catch(() => []),
+        analyticsService.getSalesPerformance().catch(() => []),
+        analyticsService.getAnalytics({ period: 'month' }).catch(() => ({})),
       ]);
 
-      const totalProducts = stockData.stocks?.length || 0;
-      const lowStockProducts = stockData.stocks?.filter(stock => stock.available_quantity <= 5).length || 0;
+      const totalProducts = stockSummaryData.length || 0;
+      const lowStockProducts = stockSummaryData.filter(stock => stock.available_stock <= 5).length || 0;
       const totalShops = shopsData.results?.length || 0;
       const invoices = invoicesData.results || [];
       const totalInvoices = invoices.length;
@@ -148,6 +166,25 @@ export const DashboardPage: React.FC = () => {
       setRecentInvoices(invoices.slice(0, 5));
       setMonthlyTrends(Array.isArray(trendsData) ? trendsData.slice(-6) : []);
       calculatePerformanceMetrics(invoices, commissionsData);
+      
+      // Top Sale Shops
+      let topShopsData: { shop_name: string; total_sales: number }[] = [];
+      if (Array.isArray(salesPerformance)) {
+        topShopsData = salesPerformance
+          .sort((a, b) => b.total_sales - a.total_sales)
+          .slice(0, 5)
+          .map(sp => ({ shop_name: sp.salesman_name, total_sales: sp.total_sales }));
+      }
+      setTopShops(topShopsData);
+      // Top Selling Products
+      let topProductsData: TopProduct[] = [];
+      if (analyticsData && Array.isArray(analyticsData.topProducts)) {
+        topProductsData = analyticsData.topProducts
+          .sort((a: TopProduct, b: TopProduct) => b.total_quantity - a.total_quantity)
+          .slice(0, 5);
+      }
+      setTopProducts(topProductsData);
+      setProductStockSummary(stockSummaryData);
       
     } catch (error) {
       console.error('Error loading owner dashboard:', error);
@@ -319,6 +356,66 @@ export const DashboardPage: React.FC = () => {
     });
   };
 
+  // Fetch top shops by invoice amount (paid/settled)
+  const fetchTopShops = async () => {
+    try {
+      const invoicesRes = await invoiceService.getInvoices({ status: 'paid', ordering: '-net_total', page_size: 100 });
+      const invoices: Invoice[] = invoicesRes.results || [];
+      // Aggregate by shop
+      const shopMap: { [shopId: number]: { shop_name: string; total_invoice: number; settled_amount: number; invoices: Invoice[] } } = {};
+      invoices.forEach(inv => {
+        if (!shopMap[inv.shop]) {
+          shopMap[inv.shop] = {
+            shop_name: inv.shop_name,
+            total_invoice: 0,
+            settled_amount: 0,
+            invoices: [],
+          };
+        }
+        shopMap[inv.shop].total_invoice += inv.net_total;
+        shopMap[inv.shop].settled_amount += inv.paid_amount;
+        shopMap[inv.shop].invoices.push(inv);
+      });
+      // Convert to array and sort
+      const topShopsArr = Object.entries(shopMap)
+        .map(([shopId, data]) => ({ shop_id: Number(shopId), ...data }))
+        .sort((a, b) => b.total_invoice - a.total_invoice)
+        .slice(0, 5);
+      setTopShops(topShopsArr);
+    } catch (error) {
+      setTopShops([]);
+    }
+  };
+  useEffect(() => {
+    if (isOwner) fetchTopShops();
+  }, [isOwner]);
+
+  // Fetch top products for a shop
+  const fetchShopProducts = async (shopId: number, invoices: Invoice[]) => {
+    // Aggregate product sales from invoices
+    const productMap: { [product: string]: number } = {};
+    invoices.forEach(inv => {
+      inv.items.forEach(item => {
+        if (!productMap[item.product_name]) productMap[item.product_name] = 0;
+        productMap[item.product_name] += item.quantity;
+      });
+    });
+    const productsArr = Object.entries(productMap)
+      .map(([product_name, quantity]) => ({ product_name, quantity }))
+      .sort((a, b) => b.quantity - a.quantity)
+      .slice(0, 5);
+    setShopProducts(prev => ({ ...prev, [shopId]: productsArr }));
+  };
+
+  const handleExpandShop = (shopId: number, invoices: Invoice[]) => {
+    if (expandedShopId === shopId) {
+      setExpandedShopId(null);
+    } else {
+      setExpandedShopId(shopId);
+      if (!shopProducts[shopId]) fetchShopProducts(shopId, invoices);
+    }
+  };
+
   if (isLoading) {
     return (
       <Layout title="Dashboard">
@@ -329,13 +426,7 @@ export const DashboardPage: React.FC = () => {
 
   const getStatCards = () => {
     const baseCards = [
-      {
-        name: 'Total Products',
-        value: stats?.totalProducts || 0,
-        icon: Package,
-        color: 'blue',
-        description: 'Products in stock',
-      },
+     
       {
         name: 'Low Stock Items',
         value: stats?.lowStockProducts || 0,
@@ -369,13 +460,7 @@ export const DashboardPage: React.FC = () => {
           color: 'orange',
           description: 'Awaiting payment',
         },
-        {
-          name: 'Outstanding Amount',
-          value: formatCurrency(stats?.outstandingAmount || 0),
-          icon: FileText,
-          color: 'yellow',
-          description: 'Amount due',
-        },
+       
       ];
     } else if (isSalesman) {
       return [
@@ -447,6 +532,32 @@ export const DashboardPage: React.FC = () => {
   return (
     <Layout title={`${isOwner ? 'Owner' : isSalesman ? 'Salesman' : ''} Dashboard`}>
       <div className="space-y-6">
+        {/* Quick Task Tiles for Owner */}
+        {isOwner && (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-4">
+            <button
+              className="flex flex-col items-center justify-center bg-green-100 dark:bg-green-900 rounded-xl p-4 shadow hover:bg-green-200 dark:hover:bg-green-800 transition"
+              onClick={() => window.location.href = '/stock-management'}
+            >
+              <RefreshCw className="h-8 w-8 mb-2 text-green-600" />
+              <span className="font-semibold text-green-700 text-sm">Restock Batches</span>
+            </button>
+            <button
+              className="flex flex-col items-center justify-center bg-blue-100 dark:bg-blue-900 rounded-xl p-4 shadow hover:bg-blue-200 dark:hover:bg-blue-800 transition"
+              onClick={() => window.location.href = '/deliveries'}
+            >
+              <Truck className="h-8 w-8 mb-2 text-blue-600" />
+              <span className="font-semibold text-blue-700 text-sm">Create Delivery</span>
+            </button>
+            <button
+              className="flex flex-col items-center justify-center bg-yellow-100 dark:bg-yellow-900 rounded-xl p-4 shadow hover:bg-yellow-200 dark:hover:bg-yellow-800 transition"
+              onClick={() => window.location.href = '/commissions'}
+            >
+              <BarChart3 className="h-8 w-8 mb-2 text-yellow-600" />
+              <span className="font-semibold text-yellow-700 text-sm">Commissions</span>
+            </button>
+          </div>
+        )}
         {/* Header with Role-Specific Title */}
         <div className="bg-white shadow rounded-lg p-6">
           <div className="flex items-center justify-between">
@@ -471,40 +582,42 @@ export const DashboardPage: React.FC = () => {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {getStatCards().map((item) => {
-            const Icon = item.icon;
-            return (
-              <div key={item.name} className="bg-white overflow-hidden shadow rounded-lg">
-                <div className="p-5">
-                  <div className="flex items-center">
-                    <div className="flex-shrink-0">
-                      <Icon
-                        className={`h-6 w-6 text-${item.color}-600`}
-                        aria-hidden="true"
-                      />
+        {isOwner && (
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {getStatCards().map((item) => {
+              const Icon = item.icon;
+              return (
+                <div key={item.name} className="bg-white overflow-hidden shadow rounded-lg">
+                  <div className="p-5">
+                    <div className="flex items-center">
+                      <div className="flex-shrink-0">
+                        <Icon
+                          className={`h-6 w-6 text-${item.color}-600`}
+                          aria-hidden="true"
+                        />
+                      </div>
+                      <div className="ml-5 w-0 flex-1">
+                        <dl>
+                          <dt className="text-sm font-medium text-gray-500 truncate">
+                            {item.name}
+                          </dt>
+                          <dd>
+                            <div className={`text-lg font-medium text-gray-900 ${getCardAmountClass(typeof item.value === 'string' ? item.value : item.value.toString())}`}>
+                              {item.value}
+                            </div>
+                          </dd>
+                        </dl>
+                      </div>
                     </div>
-                    <div className="ml-5 w-0 flex-1">
-                      <dl>
-                        <dt className="text-sm font-medium text-gray-500 truncate">
-                          {item.name}
-                        </dt>
-                        <dd>
-                          <div className={`text-lg font-medium text-gray-900 ${getCardAmountClass(typeof item.value === 'string' ? item.value : item.value.toString())}`}>
-                            {item.value}
-                          </div>
-                        </dd>
-                      </dl>
+                    <div className="mt-2">
+                      <p className="text-xs text-gray-500">{item.description}</p>
                     </div>
-                  </div>
-                  <div className="mt-2">
-                    <p className="text-xs text-gray-500">{item.description}</p>
                   </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Owner-specific Commission Overview */}
         {isOwner && commissionData && (
@@ -610,6 +723,19 @@ export const DashboardPage: React.FC = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {/* Remaining Products to Sell for Salesmen */}
+        {isSalesman && (
+          <div className="bg-white shadow rounded-lg mb-6">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900">🗃️ Remaining Products to Sell</h3>
+              <p className="text-gray-600 text-sm">These are the products you currently have available to create invoices.</p>
+            </div>
+            <div className="overflow-x-auto">
+              <SalesmanAvailableProductsTable />
             </div>
           </div>
         )}
@@ -790,5 +916,54 @@ export const DashboardPage: React.FC = () => {
         )}
       </div>
     </Layout>
+  );
+};
+
+const SalesmanAvailableProductsTable: React.FC = () => {
+  const [products, setProducts] = useState<SalesmanAvailableProduct[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await productService.getSalesmanAvailableProducts();
+        setProducts(res || []);
+      } catch (err) {
+        setError('Failed to load available products.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchProducts();
+  }, []);
+
+  if (loading) return <div className="p-4 text-gray-500">Loading...</div>;
+  if (error) return <div className="p-4 text-red-500">{error}</div>;
+  if (!products.length) return <div className="p-4 text-gray-500">No products available to sell.</div>;
+
+  return (
+    <table className="min-w-full divide-y divide-gray-200">
+      <thead className="bg-gray-50">
+        <tr>
+          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
+          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
+          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Available Qty</th>
+          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
+        </tr>
+      </thead>
+      <tbody className="bg-white divide-y divide-gray-200">
+        {products.map((prod) => (
+          <tr key={prod.product_id}>
+            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{prod.product_name}</td>
+            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{prod.product_sku}</td>
+            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-blue-700">{prod.total_available_quantity}</td>
+            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{prod.unit}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 };
