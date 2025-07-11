@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y \
     postgresql-contrib \
     postgresql-client \
     redis-server \
-    nginx \
     supervisor \
     curl \
     wget \
@@ -99,49 +98,6 @@ else:
     print("Superuser admin already exists.")
 EOF
 
-# Configure Nginx
-COPY <<EOF /etc/nginx/sites-available/default
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    
-    server_name _;
-    
-    # Serve React build files
-    location / {
-        root /app/frontend/build;
-        try_files $uri $uri/ /index.html;
-    }
-    
-    # Proxy Django API requests
-    location /api/ {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    
-    # Proxy Django admin
-    location /admin/ {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    
-    # Serve Django static files
-    location /static/ {
-        alias /app/backend/staticfiles/;
-    }
-    
-    # Serve Django media files
-    location /media/ {
-        alias /app/backend/media/;
-    }
-}
-EOF
 
 # Configure Supervisor
 COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
@@ -187,14 +143,7 @@ redirect_stderr=true
 stdout_logfile=/var/log/supervisor/react-dev.log
 environment=HOST="0.0.0.0",PORT="3000"
 
-[program:nginx]
-command=/usr/sbin/nginx -g "daemon off;"
-user=root
-autostart=true
-autorestart=true
-redirect_stderr=true
-stdout_logfile=/var/log/supervisor/nginx.log
-EOF
+
 
 # Create startup script
 WORKDIR /app
@@ -236,7 +185,7 @@ RUN mkdir -p /var/log/supervisor \
     && (id -u redis >/dev/null 2>&1 || useradd --system --home /var/lib/redis --shell /bin/false redis)
 
 # Expose all required ports
-EXPOSE 80 3000 8000 5432 6379
+EXPOSE 3000 8000 5432 6379
 
 # Set working directory
 WORKDIR /app
