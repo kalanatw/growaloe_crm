@@ -438,7 +438,7 @@ class Delivery(models.Model):
         }
     
     def settle_delivery(self, settlement_data, settlement_notes=""):
-        """Settle the delivery by processing returned stock through batch assignments"""
+        """Settle the delivery by processing returned stock through batch assignments batch-wise"""
         if self.status != 'delivered':
             raise ValueError("Only delivered deliveries can be settled")
         
@@ -448,10 +448,11 @@ class Delivery(models.Model):
             delivery_item = self.items.get(id=item_data['delivery_item_id'])
             remaining_qty = item_data['remaining_quantity']
             
-            # Process returns through batch assignments
+            # Process returns through batch assignments (batch-wise)
             if remaining_qty > 0:
-                # Find batch assignments for this salesman and product
+                # Find batch assignments for this delivery and product
                 assignments = BatchAssignment.objects.filter(
+                    delivery=self,
                     batch__product=delivery_item.product,
                     salesman=self.salesman,
                     status__in=['delivered', 'partial']
@@ -484,7 +485,7 @@ class Delivery(models.Model):
                             balance_after=assignment.batch.current_quantity,
                             reference_type='delivery_settlement',
                             reference_id=self.id,
-                            notes=f"Settlement return from {self.salesman.user.get_full_name()}",
+                            notes=f"Settlement return from {self.salesman.user.get_full_name()} (Delivery: {self.delivery_number})",
                             created_by=self.created_by
                         )
                         

@@ -19,6 +19,7 @@ interface DeliveryFormData {
   items: {
     product: number;
     quantity: number;
+    unit_price: number; // Add unit price
     notes: string;
   }[];
 }
@@ -106,6 +107,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
       items: validItems.map(item => ({
         product: item.product,
         quantity: item.quantity,
+        unit_price: item.unit_price, // include unit price
         notes: item.notes || undefined,
       })),
     };
@@ -205,7 +207,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
               <h3 className="text-lg font-semibold text-gray-900">Products</h3>
               <button
                 type="button"
-                onClick={() => append({ product: 0, quantity: 1, notes: '' })}
+                onClick={() => append({ product: 0, quantity: 1, unit_price: 0.01, notes: '' })}
                 className="btn btn-outline btn-sm flex items-center space-x-1"
               >
                 <Plus className="w-4 h-4" />
@@ -229,7 +231,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                     )}
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Product *
@@ -299,6 +301,27 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                         placeholder="Optional notes for this item"
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Unit Price *
+                      </label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        {...register(`items.${index}.unit_price`, {
+                          required: 'Unit price is required',
+                          min: { value: 0.01, message: 'Unit price must be positive' },
+                          valueAsNumber: true,
+                        })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      {errors.items?.[index]?.unit_price && (
+                        <p className="text-red-500 text-sm mt-1">
+                          {errors.items[index]?.unit_price?.message}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

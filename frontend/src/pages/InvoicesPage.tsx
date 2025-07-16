@@ -4,6 +4,7 @@ import { Layout } from '../components/Layout';
 import { LoadingCard } from '../components/LoadingSpinner';
 import { FileText, Plus, Eye, Filter, Search, Download } from 'lucide-react';
 import { invoiceService } from '../services/apiServices';
+import { shopService } from '../services/apiServices';
 import { Invoice } from '../types';
 import { INVOICE_STATUS } from '../config/constants';
 import { format } from 'date-fns';
@@ -15,34 +16,55 @@ import toast from 'react-hot-toast';
 export const InvoicesPage: React.FC = () => {
   const { user } = useAuth();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [shops, setShops] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [expandedShopId, setExpandedShopId] = useState<number | null>(null);
 
   useEffect(() => {
-    loadInvoices();
+    loadInvoicesAndShops();
   }, []);
 
-  const loadInvoices = async () => {
+  const loadInvoicesAndShops = async () => {
     try {
       setIsLoading(true);
-      const data = await invoiceService.getInvoices({ ordering: '-created_at' });
-      setInvoices(data.results);
+      const [invoiceData, shopData] = await Promise.all([
+        invoiceService.getInvoices({ ordering: '-created_at' }),
+        shopService.getShops(),
+      ]);
+      setInvoices(invoiceData.results);
+      setShops(shopData.results);
     } catch (error) {
-      console.error('Error loading invoices:', error);
+      console.error('Error loading invoices or shops:', error);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const filteredInvoices = invoices.filter((invoice) => {
-    const matchesFilter = filter === 'all' || invoice.status === filter;
-    const matchesSearch = 
-      invoice.invoice_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      invoice.shop_name.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    return matchesFilter && matchesSearch;
+  // Group invoices by shop
+  const shopInvoiceMap: { [shopId: number]: Invoice[] } = {};
+  invoices.forEach((inv) => {
+    if (!shopInvoiceMap[inv.shop]) shopInvoiceMap[inv.shop] = [];
+    shopInvoiceMap[inv.shop].push(inv);
   });
+
+  // Filtering/search logic
+  const filteredShops = shops.filter((shop) =>
+    shop.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // Shop summary helpers
+  const getShopSummary = (shopId: number) => {
+    const shopInvoices = shopInvoiceMap[shopId] || [];
+    const totalAmount = shopInvoices.reduce((sum, inv) => sum + inv.net_total, 0);
+    const outstanding = shopInvoices.reduce((sum, inv) => sum + (inv.balance_due || 0), 0);
+    return {
+      count: shopInvoices.length,
+      totalAmount,
+      outstanding,
+    };
+  };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -112,39 +134,6 @@ export const InvoicesPage: React.FC = () => {
               </div>
             </div>
           </div>
-
-          <div className="card p-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0 p-3 rounded-lg bg-green-500">
-                <FileText className="h-6 w-6 text-white" />
-              </div>
-              <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                  Paid Invoices
-                </p>
-                <p className="text-2xl font-semibold text-gray-900 dark:text-white">
-                  {statusCounts.paid || 0}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="card p-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0 p-3 rounded-lg bg-yellow-500">
-                <FileText className="h-6 w-6 text-white" />
-              </div>
-              <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                  Pending
-                </p>
-                <p className="text-2xl font-semibold text-gray-900 dark:text-white">
-                  {statusCounts.pending || 0}
-                </p>
-              </div>
-            </div>
-          </div>
-
           <div className="card p-6">
             <div className="flex items-center">
               <div className="flex-shrink-0 p-3 rounded-lg bg-purple-500">
@@ -154,47 +143,29 @@ export const InvoicesPage: React.FC = () => {
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                   Total Value
                 </p>
-                <p className={`${getCardAmountClass(totalAmount)} text-gray-900 dark:text-white`}>
-                  {formatCurrency(totalAmount, { useLocaleString: true })}
+                <p className={`${getCardAmountClass(invoices.reduce((sum, inv) => sum + inv.net_total, 0))} text-gray-900 dark:text-white`}>
+                  {formatCurrency(invoices.reduce((sum, inv) => sum + inv.net_total, 0), { useLocaleString: true })}
                 </p>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Filters and Actions */}
+        {/* Search */}
         <div className="card p-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
             <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
-              {/* Search */}
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
                 <input
                   type="text"
-                  placeholder="Search invoices..."
+                  placeholder="Search shops..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
                 />
               </div>
-
-              {/* Status Filter */}
-              <select
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                className="input"
-              >
-                <option value="all">All Statuses</option>
-                <option value="draft">Draft ({statusCounts.draft || 0})</option>
-                <option value="pending">Pending ({statusCounts.pending || 0})</option>
-                <option value="paid">Paid ({statusCounts.paid || 0})</option>
-                <option value="partial">Partial ({statusCounts.partial || 0})</option>
-                <option value="overdue">Overdue ({statusCounts.overdue || 0})</option>
-                <option value="cancelled">Cancelled ({statusCounts.cancelled || 0})</option>
-              </select>
             </div>
-
-            {/* Create Invoice Button */}
             <Link to="/invoices/create" className="btn-primary">
               <Plus className="h-4 w-4 mr-2" />
               Create Invoice
@@ -202,121 +173,84 @@ export const InvoicesPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Invoices Table */}
-        <div className="card">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-800">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Invoice
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Shop
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Date
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Amount
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-                {filteredInvoices.length > 0 ? (
-                  filteredInvoices.map((invoice) => (
-                    <tr key={invoice.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div>
-                          <div className="text-sm font-medium text-gray-900 dark:text-white">
-                            {invoice.invoice_number}
-                          </div>
-                          <div className="text-sm text-gray-500 dark:text-gray-400">
-                            {invoice.items_count} items
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900 dark:text-white">
-                          {invoice.shop_name}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900 dark:text-white">
-                          {format(new Date(invoice.invoice_date), 'MMM dd, yyyy')}
-                        </div>
-                        {invoice.due_date && (
-                          <div className="text-sm text-gray-500 dark:text-gray-400">
-                            Due: {format(new Date(invoice.due_date), 'MMM dd, yyyy')}
-                          </div>
+        {/* Shop-centric Accordion/Table */}
+        <div className="space-y-4">
+          {filteredShops.length === 0 && (
+            <div className="p-6 text-center text-gray-500 dark:text-gray-400">No shops found.</div>
+          )}
+          {filteredShops.map((shop) => {
+            const summary = getShopSummary(shop.id);
+            const shopInvoices = shopInvoiceMap[shop.id] || [];
+            return (
+              <div key={shop.id} className="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700">
+                <div
+                  className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
+                  onClick={() => setExpandedShopId(expandedShopId === shop.id ? null : shop.id)}
+                >
+                  <div>
+                    <div className="font-bold text-lg text-gray-900 dark:text-white">{shop.name}</div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400">{summary.count} invoices | Total: {formatCurrency(summary.totalAmount)} | Outstanding: {formatCurrency(summary.outstanding)}</div>
+                  </div>
+                  <button className="text-primary-600 font-medium">
+                    {expandedShopId === shop.id ? 'Hide' : 'View'}
+                  </button>
+                </div>
+                {expandedShopId === shop.id && (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                      <thead className="bg-gray-50 dark:bg-gray-900">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Invoice</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Date</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Amount</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Paid</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Outstanding</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        {shopInvoices.length === 0 ? (
+                          <tr><td colSpan={7} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">No invoices for this shop.</td></tr>
+                        ) : (
+                          shopInvoices.map((invoice) => (
+                            <tr key={invoice.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <div className="text-sm font-medium text-gray-900 dark:text-white">{invoice.invoice_number}</div>
+                                <div className="text-sm text-gray-500 dark:text-gray-400">{invoice.items_count} items</div>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                                {format(new Date(invoice.invoice_date), 'MMM dd, yyyy')}
+                                {invoice.due_date && (
+                                  <div className="text-xs text-gray-500 dark:text-gray-400">Due: {format(new Date(invoice.due_date), 'MMM dd, yyyy')}</div>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{formatCurrency(invoice.net_total)}</td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{formatCurrency(invoice.paid_amount)}</td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-600">{formatCurrency(invoice.balance_due)}</td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(invoice.status)}`}>{invoice.status}</span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                <div className="flex items-center space-x-2">
+                                  <Link to={`/invoices/${invoice.id}`} className="text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" title="View Invoice">
+                                    <Eye className="h-4 w-4" />
+                                  </Link>
+                                  <button onClick={() => handleDownloadPDF(invoice)} className="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" title="Download PDF">
+                                    <Download className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
                         )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className={`${getTableAmountClass(invoice.net_total)} text-gray-900 dark:text-white`}>
-                          {formatCurrency(invoice.net_total, { useLocaleString: true })}
-                        </div>
-                        {invoice.paid_amount > 0 && (
-                          <div className="text-sm text-gray-500 dark:text-gray-400">
-                            Paid: {formatCurrency(invoice.paid_amount, { useLocaleString: true })}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span
-                          className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(
-                            invoice.status
-                          )}`}
-                        >
-                          {invoice.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                        <div className="flex items-center space-x-2">
-                          <Link
-                            to={`/invoices/${invoice.id}`}
-                            className="text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-                            title="View Invoice"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </Link>
-                          <button
-                            onClick={() => handleDownloadPDF(invoice)}
-                            className="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-                            title="Download PDF"
-                          >
-                            <Download className="h-4 w-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={6} className="px-6 py-8 text-center">
-                      <div className="flex flex-col items-center">
-                        <FileText className="h-12 w-12 text-gray-400 mb-4" />
-                        <p className="text-gray-500 dark:text-gray-400">
-                          {searchTerm || filter !== 'all' ? 'No invoices match your criteria' : 'No invoices found'}
-                        </p>
-                        {(!searchTerm && filter === 'all') && (
-                          <Link to="/invoices/create" className="mt-4 btn-primary">
-                            <Plus className="h-4 w-4 mr-2" />
-                            Create Your First Invoice
-                          </Link>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 )}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </Layout>

@@ -192,6 +192,13 @@ class DeliveryItemSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'product_name', 'product_sku', 'product_base_price', 'total_value']
     
+    def validate_unit_price(self, value):
+        if value is None:
+            raise serializers.ValidationError("Unit price is required.")
+        if value <= 0:
+            raise serializers.ValidationError("Unit price must be greater than 0.")
+        return value
+    
     @extend_schema_field(serializers.DecimalField)
     def get_total_value(self, obj):
         return obj.total_value
@@ -278,10 +285,14 @@ class CreateDeliverySerializer(serializers.ModelSerializer):
         if len(product_ids) != len(set(product_ids)):
             raise serializers.ValidationError("Duplicate products are not allowed in a delivery.")
         
-        # Validate quantities
+        # Validate quantities and unit prices
         for item in items:
             if item['quantity'] <= 0:
                 raise serializers.ValidationError("Quantity must be greater than 0.")
+            if 'unit_price' not in item or item['unit_price'] is None:
+                raise serializers.ValidationError("Unit price is required for each item.")
+            if item['unit_price'] <= 0:
+                raise serializers.ValidationError("Unit price must be greater than 0.")
         
         return items
     

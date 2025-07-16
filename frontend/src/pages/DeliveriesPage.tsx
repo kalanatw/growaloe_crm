@@ -21,7 +21,8 @@ import {
   Phone,
   Mail,
   ToggleLeft,
-  ToggleRight
+  ToggleRight,
+  CloudCog
 } from 'lucide-react';
 import { deliveryService, salesmanService } from '../services/apiServices';
 import { Delivery, Salesman } from '../types';
@@ -361,7 +362,11 @@ const SalesmanCentricView: React.FC<{
             <div>
               <p className="text-sm font-medium text-gray-600">Total Stock Value</p>
               <p className="text-2xl font-bold text-gray-900">
-                LKR {(salesmanOverview?.total_stock_value || 0).toFixed(2)}
+                {`LKR ${(
+                  (salesmanOverview?.salesmen?.reduce((sum: number, s: any) =>
+                    sum + (s.stock_by_product?.reduce((pSum: number, p: any) => pSum + (p.quantity * Number(p.unit_price || 0)), 0) || 0)
+                  , 0) || 0)
+                ).toFixed(2)}`}
               </p>
             </div>
             <Package className="w-8 h-8 text-green-500" />
@@ -740,38 +745,34 @@ const DeliveryDetailsModal: React.FC<{
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Product
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      SKU
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Quantity
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Notes
-                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Price</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Value</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {delivery.items.map((item, index) => (
                     <tr key={index}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {item.product_name}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {item.product_sku}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {item.quantity}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {item.notes || '-'}
-                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.product_name}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.product_sku}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.quantity}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">LKR {Number(item.unit_price || 0).toFixed(2)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">LKR {(item.quantity * Number(item.unit_price || 0)).toFixed(2)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.notes || '-'}</td>
+        
                     </tr>
                   ))}
                 </tbody>
+                <tfoot>
+                  <tr>
+                    <td colSpan={4} className="px-6 py-4 text-right font-bold text-gray-700">Delivery Total:</td>
+                    <td className="px-6 py-4 font-bold text-lg text-green-700">LKR {delivery.items.reduce((sum, item) => sum + (item.quantity * Number(item.unit_price || 0)), 0).toFixed(2)}</td>
+                    <td></td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           </div>
@@ -936,7 +937,9 @@ const SalesmanStockOverview: React.FC<{
                 {salesman.total_stock_quantity} items
               </p>
               <p className="text-sm text-blue-700">
-                LKR {salesman.total_stock_value.toFixed(2)}
+                {`LKR ${(
+                  salesman.stock_by_product.reduce((sum: number, p: any) => sum + (p.quantity * Number(p.unit_price || 0)), 0)
+                ).toFixed(2)}`}
               </p>
             </div>
 
@@ -966,6 +969,9 @@ const SalesmanStockOverview: React.FC<{
                       </span>
                       <span className="text-gray-900 font-medium">
                         {product.quantity}
+                      </span>
+                      <span className="text-gray-700 ml-2">
+                        LKR {Number(product.unit_price || 0).toFixed(2)}
                       </span>
                     </div>
                   ))}
@@ -1362,10 +1368,10 @@ const SalesmanDetailsModal: React.FC<{
                             {product.quantity}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                            LKR {product.unit_price.toFixed(2)}
+                            LKR {Number(product.unit_price || 0).toFixed(2)}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                            LKR {product.total_value.toFixed(2)}
+                            LKR {(product.quantity * Number(product.unit_price || 0)).toFixed(2)}
                           </td>
                         </tr>
                       ))}
@@ -1374,70 +1380,7 @@ const SalesmanDetailsModal: React.FC<{
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Delivery Summary */}
-          <div>
-            <h3 className="text-lg font-medium text-gray-900 mb-3">Delivery Summary</h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="card p-4 text-center">
-                <p className="text-xl font-bold text-gray-900">
-                  {salesman.deliveries.total_count}
-                </p>
-                <p className="text-sm text-gray-600">Total</p>
-              </div>
-              <div className="card p-4 text-center">
-                <p className="text-xl font-bold text-yellow-600">
-                  {salesman.deliveries.pending_count}
-                </p>
-                <p className="text-sm text-gray-600">Pending</p>
-              </div>
-              <div className="card p-4 text-center">
-                <p className="text-xl font-bold text-green-600">
-                  {salesman.deliveries.delivered_count}
-                </p>
-                <p className="text-sm text-gray-600">Delivered</p>
-              </div>
-              <div className="card p-4 text-center">
-                <p className="text-xl font-bold text-blue-600">
-                  {salesman.deliveries.settled_count}
-                </p>
-                <p className="text-sm text-gray-600">Settled</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Performance Chart */}
-          <div>
-            <h3 className="text-lg font-medium text-gray-900 mb-3">
-              Sales Performance (Last 30 Days)
-            </h3>
-            <div className="card p-4">
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="text-center">
-                  <p className="text-xl font-bold text-green-600">
-                    LKR {salesman.sales_performance.total_revenue_30d.toFixed(2)}
-                  </p>
-                  <p className="text-sm text-gray-600">Total Revenue</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-xl font-bold text-blue-600">
-                    {salesman.sales_performance.total_quantity_30d}
-                  </p>
-                  <p className="text-sm text-gray-600">Items Sold</p>
-                </div>
-              </div>
-              
-              {salesman.sales_performance.last_30_days.length > 0 ? (
-                <div className="text-sm text-gray-600">
-                  <p>Recent daily sales available</p>
-                  <p>Best day: {Math.max(...salesman.sales_performance.last_30_days.map((d: any) => d.daily_revenue))} LKR</p>
-                </div>
-              ) : (
-                <p className="text-sm text-gray-500">No sales data for the last 30 days</p>
-              )}
-            </div>
-          </div>
+          </div>         
         </div>
       </div>
     </div>

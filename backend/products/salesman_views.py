@@ -89,19 +89,21 @@ class SalesmanDeliveryViewSet(viewsets.ModelViewSet):
                 outstanding_qty = assignment.outstanding_quantity
                 
                 if outstanding_qty > 0:
+                    # Use delivery item unit_price if available
+                    delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=product).first()
+                    unit_price = float(delivery_item.unit_price) if delivery_item else float(product.base_price)
                     if product.id not in stock_by_product:
                         stock_by_product[product.id] = {
                             'product_id': product.id,
                             'product_name': product.name,
                             'product_sku': product.sku,
-                            'unit_price': float(product.base_price),
+                            'unit_price': unit_price,
                             'quantity': 0,
                             'total_value': 0
                         }
-                    
                     stock_by_product[product.id]['quantity'] += outstanding_qty
-                    stock_by_product[product.id]['total_value'] += outstanding_qty * float(product.base_price)
-                    total_stock_value += outstanding_qty * float(product.base_price)
+                    stock_by_product[product.id]['total_value'] += outstanding_qty * unit_price
+                    total_stock_value += outstanding_qty * unit_price
             
             # Get sales data for today
             today = timezone.now().date()
@@ -422,7 +424,10 @@ class SalesmanDeliveryViewSet(viewsets.ModelViewSet):
             for assignment in outstanding_assignments:
                 outstanding_qty = assignment.outstanding_quantity
                 if outstanding_qty > 0:
-                    outstanding_value += outstanding_qty * float(assignment.batch.product.base_price)
+                    # Use delivery item unit_price if available
+                    delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=assignment.batch.product).first()
+                    unit_price = float(delivery_item.unit_price) if delivery_item else float(assignment.batch.product.base_price)
+                    outstanding_value += outstanding_qty * unit_price
                     outstanding_products += outstanding_qty
             
             # Determine recommendation
@@ -531,7 +536,10 @@ class DeliveryBySalesmanView(APIView):
             for assignment in outstanding_assignments:
                 outstanding_qty = assignment.outstanding_quantity
                 if outstanding_qty > 0:
-                    outstanding_value += outstanding_qty * float(assignment.batch.product.base_price)
+                    # Use delivery item unit_price if available
+                    delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=assignment.batch.product).first()
+                    unit_price = float(delivery_item.unit_price) if delivery_item else float(assignment.batch.product.base_price)
+                    outstanding_value += outstanding_qty * unit_price
                     outstanding_items += outstanding_qty
             
             # Get recent delivery activity
@@ -625,18 +633,21 @@ class SalesmanDeliveryDetailView(APIView):
             outstanding_qty = assignment.outstanding_quantity
             if outstanding_qty > 0:
                 product = assignment.batch.product
+                # Use delivery item unit_price if available
+                delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=assignment.batch.product).first()
+                unit_price = float(delivery_item.unit_price) if delivery_item else float(assignment.batch.product.base_price)
                 if product.id not in stock_by_product:
                     stock_by_product[product.id] = {
                         'product_id': product.id,
                         'product_name': product.name,
                         'product_sku': product.sku,
                         'quantity': 0,
-                        'unit_price': float(product.base_price),
+                        'unit_price': unit_price,
                         'total_value': 0
                     }
                 
                 stock_by_product[product.id]['quantity'] += outstanding_qty
-                stock_by_product[product.id]['total_value'] += outstanding_qty * float(product.base_price)
+                stock_by_product[product.id]['total_value'] += outstanding_qty * unit_price
         
         # Get sales history for last 30 days
         sales_history = InvoiceItem.objects.filter(
@@ -780,9 +791,11 @@ class SettleSalesmanDeliveryView(APIView):
                         assignment.batch.save()
                     
                     # Track settlement data
-                    delivered_value = assignment.delivered_quantity * float(product.base_price)
-                    sold_value = sold_qty * float(product.base_price)
-                    returned_value = outstanding_qty * float(product.base_price) if return_all_stock else 0
+                    delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=product).first()
+                    unit_price = float(delivery_item.unit_price) if delivery_item else float(product.base_price)
+                    delivered_value = assignment.delivered_quantity * unit_price
+                    sold_value = sold_qty * unit_price
+                    returned_value = outstanding_qty * unit_price if return_all_stock else 0
                     
                     settlement_data['total_delivered_value'] += delivered_value
                     settlement_data['total_sold_value'] += sold_value

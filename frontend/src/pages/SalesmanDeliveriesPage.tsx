@@ -759,7 +759,7 @@ const SalesmanDetailsModal: React.FC<{
 
           {/* Delivery Summary */}
           <div>
-            <h3 className="text-lg font-medium text-gray-900 mb-3">Delivery Summary</h3>
+            <h3 className="text-lg font-medium text-gray-900 mb-3">Deliveryy Summary</h3>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="card p-4 text-center">
                 <p className="text-xl font-bold text-gray-900">

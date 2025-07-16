@@ -339,6 +339,7 @@ export interface DeliveryItem {
   product_name?: string;
   product_sku?: string;
   quantity: number;
+  unit_price: number;
   notes?: string;
 }
 

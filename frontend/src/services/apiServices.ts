@@ -548,7 +548,11 @@ export const deliveryService = {
     };
     settlement_record?: any;
   }> => {
-    return apiClient.post(`/products/deliveries/settle/${salesmanId}/`, data);
+    // Always include salesman_id in the payload
+    return apiClient.post(`/products/deliveries/settle/${salesmanId}/`, {
+      ...data,
+      salesman_id: salesmanId,
+    });
   },
 
   getDailySummary: async (date?: string): Promise<{
