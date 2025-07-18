@@ -660,4 +660,36 @@ export const deliveryService = {
   }> => {
     return apiClient.put('/products/deliveries/update-sold/', data);
   },
+
+  getDeliveryExpenses: async (deliveryId: number) => {
+    return apiClient.get('/products/delivery-expenses/', { delivery: deliveryId });
+  },
+
+  createDeliveryExpense: async (data: {
+    delivery: number;
+    category: string;
+    amount: number;
+    ref_id?: string;
+    notes?: string;
+  }) => {
+    return apiClient.post('/products/delivery-expenses/', data);
+  },
+
+  updateDeliveryExpense: async (id: number, data: {
+    category?: string;
+    amount?: number;
+    ref_id?: string;
+    notes?: string;
+  }) => {
+    return apiClient.patch(`/products/delivery-expenses/${id}/`, data);
+  },
+
+  deleteDeliveryExpense: async (id: number) => {
+    return apiClient.delete(`/products/delivery-expenses/${id}/`);
+  },
+
+  // Add a method to get settlement history for a salesman
+  getSettlementHistory: async (salesmanId: number) => {
+    return apiClient.get('/products/delivery-settlements/', { salesman: salesmanId });
+  },
 };

@@ -392,6 +392,16 @@ export interface CreateBatchInvoiceData {
   items: BatchInvoiceItemData[];
 }
 
+export interface DeliveryExpense {
+  id: number;
+  delivery: number;
+  category: string;
+  amount: number;
+  ref_id?: string;
+  notes?: string;
+  created_at: string;
+}
+
 export interface Delivery {
   id?: number;
   delivery_number?: string;
@@ -410,6 +420,7 @@ export interface Delivery {
   created_by_name?: string;
   created_at?: string;
   updated_at?: string;
+  expenses?: DeliveryExpense[];
 }
 
 export interface CreateDeliveryData {

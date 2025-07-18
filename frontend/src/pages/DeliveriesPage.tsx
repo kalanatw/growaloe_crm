@@ -1,98 +1,52 @@
 import React, { useState, useEffect } from 'react';
 import { Layout } from '../components/Layout';
 import { LoadingSpinner } from '../components/LoadingSpinner';
-import { 
-  Plus, 
-  Package, 
-  Calendar, 
-  User, 
-  CheckCircle, 
-  Clock, 
-  Eye,
-  Edit,
-  Truck,
-  Calculator,
-  DollarSign,
-  TrendingUp,
-  AlertTriangle,
-  Users,
-  BarChart3,
-  ArrowRight,
-  Phone,
-  Mail,
-  ToggleLeft,
-  ToggleRight,
-  CloudCog
-} from 'lucide-react';
+import { Plus, Users, Package, Calculator, DollarSign, BarChart3, Eye, CheckCircle, Mail, AlertTriangle, TrendingUp, ArrowRight } from 'lucide-react';
 import { deliveryService, salesmanService } from '../services/apiServices';
-import { Delivery, Salesman } from '../types';
 import toast from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
 import { CreateDeliveryModal } from '../components/CreateDeliveryModal';
-import { SettlementModal } from '../components/SettlementModal';
 
 export const DeliveriesPage: React.FC = () => {
   const { user } = useAuth();
-  const [useSalesmanView, setUseSalesmanView] = useState(true); // Default to new view
-  
-  // Legacy state
-  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
-  const [salesmen, setSalesmen] = useState<Salesman[]>([]);
-  const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
-  const [settlementDeliveryId, setSettlementDeliveryId] = useState<number | null>(null);
-  
-  // New salesman-centric state
   const [salesmanOverview, setSalesmanOverview] = useState<any>(null);
   const [settlementQueue, setSettlementQueue] = useState<any>(null);
   const [dailySummary, setDailySummary] = useState<any>(null);
   const [selectedView, setSelectedView] = useState<'overview' | 'settlement' | 'summary'>('overview');
   const [selectedSalesman, setSelectedSalesman] = useState<any>(null);
   const [isSettling, setIsSettling] = useState<number | null>(null);
-  
   const [isLoading, setIsLoading] = useState(true);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [salesmen, setSalesmen] = useState<any[]>([]);
+  const [historyModalSalesman, setHistoryModalSalesman] = useState<any | null>(null);
+  const [historyDeliveries, setHistoryDeliveries] = useState<any[]>([]);
+  const [historySettlements, setHistorySettlements] = useState<any[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyTab, setHistoryTab] = useState<'deliveries' | 'settlements'>('deliveries');
 
   useEffect(() => {
     loadData();
-    
-    // Set up real-time updates every 30 seconds, but pause when modals are open
     const interval = setInterval(() => {
-      // Don't auto-refresh if any modal is open to avoid interrupting user interactions
-      if (!isCreateModalOpen && !selectedDelivery && !settlementDeliveryId && !selectedSalesman) {
+      if (!isCreateModalOpen && !selectedSalesman) {
         loadData();
       }
     }, 30000);
-
     return () => clearInterval(interval);
-  }, [isCreateModalOpen, selectedDelivery, settlementDeliveryId, selectedSalesman, useSalesmanView]);
+  }, [isCreateModalOpen, selectedSalesman]);
 
   const loadData = async () => {
     try {
       setIsLoading(true);
-      
-      if (useSalesmanView) {
-        // Load salesman-centric data
-        const [overviewData, queueData, summaryData, salesmenData] = await Promise.all([
-          deliveryService.getSalesmanOverview(),
-          deliveryService.getSettlementQueue(),
-          deliveryService.getDailySummary(),
-          salesmanService.getSalesmen(),
-        ]);
-        
-        setSalesmanOverview(overviewData);
-        setSettlementQueue(queueData);
-        setDailySummary(summaryData);
-        setSalesmen(salesmenData.results);
-      } else {
-        // Load legacy delivery data
-        const [deliveriesData, salesmenData] = await Promise.all([
-          deliveryService.getDeliveries(),
-          salesmanService.getSalesmen(),
-        ]);
-        
-        setDeliveries(deliveriesData.results);
-        setSalesmen(salesmenData.results);
-      }
+      const [overviewData, queueData, summaryData, salesmenData] = await Promise.all([
+        deliveryService.getSalesmanOverview(),
+        deliveryService.getSettlementQueue(),
+        deliveryService.getDailySummary(),
+        salesmanService.getSalesmen(),
+      ]);
+      setSalesmanOverview(overviewData);
+      setSettlementQueue(queueData);
+      setDailySummary(summaryData);
+      setSalesmen(salesmenData.results);
     } catch (error) {
       console.error('Error loading data:', error);
       toast.error('Failed to load deliveries');
@@ -106,31 +60,13 @@ export const DeliveriesPage: React.FC = () => {
       await deliveryService.createDelivery(deliveryData);
       toast.success('Delivery created successfully!');
       setIsCreateModalOpen(false);
-      loadData(); // Reload the deliveries
+      loadData();
     } catch (error: any) {
       console.error('Error creating delivery:', error);
       toast.error(error.response?.data?.detail || 'Failed to create delivery');
     }
   };
 
-  // Legacy handlers
-  const handleMarkAsDelivered = async (deliveryId: number) => {
-    try {
-      await deliveryService.markAsDelivered(deliveryId);
-      toast.success('Delivery marked as delivered!');
-      loadData(); // Reload the deliveries
-    } catch (error: any) {
-      console.error('Error updating delivery status:', error);
-      toast.error(error.response?.data?.detail || 'Failed to update delivery status');
-    }
-  };
-
-  const handleSettlementCompleted = () => {
-    setSettlementDeliveryId(null);
-    loadData(); // Reload deliveries to reflect settlement
-  };
-
-  // New salesman-centric handlers
   const handleSettleSalesman = async (salesmanId: number, settlement_notes: string = '') => {
     try {
       setIsSettling(salesmanId);
@@ -139,9 +75,8 @@ export const DeliveriesPage: React.FC = () => {
         return_all_stock: true,
         create_settlement_record: true
       });
-      
       toast.success(`Settlement completed for ${result.salesman_name}!`);
-      loadData(); // Refresh data
+      loadData();
     } catch (error: any) {
       console.error('Error settling salesman:', error);
       toast.error(error.response?.data?.error || 'Failed to settle deliveries');
@@ -160,6 +95,32 @@ export const DeliveriesPage: React.FC = () => {
     }
   };
 
+  const handleShowHistoryModal = async (salesman: any) => {
+    setHistoryModalSalesman(salesman);
+    setIsHistoryLoading(true);
+    setHistoryTab('deliveries');
+    try {
+      const [deliveriesRes, settlementsRes] = await Promise.all([
+        fetch(`/api/products/deliveries/?salesman=${salesman.salesman_id}`),
+        fetch(`/api/products/delivery-settlements/?salesman=${salesman.salesman_id}`)
+      ]);
+      const deliveriesData = await deliveriesRes.json();
+      const settlementsData = await settlementsRes.json();
+      setHistoryDeliveries(deliveriesData.results || deliveriesData);
+      setHistorySettlements(settlementsData.results || settlementsData);
+    } catch (err) {
+      setHistoryDeliveries([]);
+      setHistorySettlements([]);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+  const handleCloseHistoryModal = () => {
+    setHistoryModalSalesman(null);
+    setHistoryDeliveries([]);
+    setHistorySettlements([]);
+  };
+
   if (isLoading) {
     return (
       <Layout title="Deliveries">
@@ -169,42 +130,13 @@ export const DeliveriesPage: React.FC = () => {
   }
 
   return (
-    <Layout title={useSalesmanView ? "Salesman-Centric Delivery Management" : "Product Deliveries"}>
+    <Layout title="Salesman-Centric Delivery Management">
       <div className="space-y-6">
-        {/* Header */}
         <div className="flex justify-between items-center">
           <div>
-            <div className="flex items-center space-x-4">
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">
-                  {useSalesmanView ? "Delivery Management" : "Product Deliveries"}
-                </h1>
-                <p className="text-gray-600">
-                  {useSalesmanView 
-                    ? "Manage deliveries and settlements by salesman" 
-                    : "Manage product allocations to salesmen"
-                  }
-                </p>
-              </div>
-              
-              {/* View Toggle */}
-              <div className="flex items-center space-x-2 ml-8">
-                <span className="text-sm text-gray-600">Legacy View</span>
-                <button
-                  onClick={() => setUseSalesmanView(!useSalesmanView)}
-                  className="relative inline-flex items-center"
-                >
-                  {useSalesmanView ? (
-                    <ToggleRight className="w-8 h-8 text-blue-600" />
-                  ) : (
-                    <ToggleLeft className="w-8 h-8 text-gray-400" />
-                  )}
-                </button>
-                <span className="text-sm text-gray-600">Salesman View</span>
-              </div>
-            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Delivery Management</h1>
+            <p className="text-gray-600">Manage deliveries and settlements by salesman</p>
           </div>
-          
           {user?.role === 'owner' && (
             <button
               onClick={() => setIsCreateModalOpen(true)}
@@ -215,30 +147,17 @@ export const DeliveriesPage: React.FC = () => {
             </button>
           )}
         </div>
-
-        {/* Render based on selected view */}
-        {useSalesmanView ? (
-          <SalesmanCentricView
-            salesmanOverview={salesmanOverview}
-            settlementQueue={settlementQueue}
-            dailySummary={dailySummary}
-            selectedView={selectedView}
-            setSelectedView={setSelectedView}
-            onViewSalesmanDetails={handleViewSalesmanDetails}
-            onSettleSalesman={handleSettleSalesman}
-            isSettling={isSettling}
-          />
-        ) : (
-          <LegacyDeliveryView
-            deliveries={deliveries}
-            user={user}
-            onViewDetails={setSelectedDelivery}
-            onMarkAsDelivered={handleMarkAsDelivered}
-            onStartSettlement={setSettlementDeliveryId}
-          />
-        )}
-
-        {/* Create Delivery Modal */}
+        <SalesmanCentricView
+          salesmanOverview={salesmanOverview}
+          settlementQueue={settlementQueue}
+          dailySummary={dailySummary}
+          selectedView={selectedView}
+          setSelectedView={setSelectedView}
+          onViewSalesmanDetails={handleViewSalesmanDetails}
+          onSettleSalesman={handleSettleSalesman}
+          isSettling={isSettling}
+          onShowHistory={handleShowHistoryModal}
+        />
         {isCreateModalOpen && (
           <CreateDeliveryModal
             isOpen={isCreateModalOpen}
@@ -247,27 +166,6 @@ export const DeliveriesPage: React.FC = () => {
             salesmen={salesmen}
           />
         )}
-
-        {/* Legacy Settlement Modal */}
-        {settlementDeliveryId && (
-          <SettlementModal
-            deliveryId={settlementDeliveryId}
-            isOpen={!!settlementDeliveryId}
-            onClose={() => setSettlementDeliveryId(null)}
-            onSettled={handleSettlementCompleted}
-          />
-        )}
-
-        {/* Legacy Delivery Details Modal */}
-        {selectedDelivery && (
-          <DeliveryDetailsModal
-            delivery={selectedDelivery}
-            isOpen={!!selectedDelivery}
-            onClose={() => setSelectedDelivery(null)}
-          />
-        )}
-
-        {/* Salesman Details Modal */}
         {selectedSalesman && (
           <SalesmanDetailsModal
             salesman={selectedSalesman}
@@ -275,50 +173,139 @@ export const DeliveriesPage: React.FC = () => {
             onClose={() => setSelectedSalesman(null)}
             onSettle={handleSettleSalesman}
             isSettling={isSettling}
+            activeDeliveryId={selectedSalesman.active_delivery_id} // Pass the active delivery ID
+            user={user} // Pass user down
           />
+        )}
+        {historyModalSalesman && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">History - {historyModalSalesman.salesman_name || historyModalSalesman.name}</h3>
+                <button className="btn btn-outline btn-sm" onClick={handleCloseHistoryModal}>Close</button>
+              </div>
+              <div className="flex space-x-4 mb-4">
+                <button
+                  className={`btn btn-sm ${historyTab === 'deliveries' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setHistoryTab('deliveries')}
+                >
+                  Deliveries
+                </button>
+                <button
+                  className={`btn btn-sm ${historyTab === 'settlements' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setHistoryTab('settlements')}
+                >
+                  Settlements
+                </button>
+              </div>
+              {isHistoryLoading ? (
+                <div className="text-center py-8">Loading...</div>
+              ) : historyTab === 'deliveries' ? (
+                historyDeliveries.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500">No deliveries found.</div>
+                ) : (
+                  <table className="min-w-full divide-y divide-gray-200 mb-6">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delivery #</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Total Value</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Expenses</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {historyDeliveries.map((delivery: any, idx: number) => (
+                        <React.Fragment key={delivery.id}>
+                          <tr>
+                            <td className="px-4 py-2 text-sm">{delivery.delivery_number}</td>
+                            <td className="px-4 py-2 text-sm">{new Date(delivery.delivery_date).toLocaleDateString()}</td>
+                            <td className="px-4 py-2 text-sm">{delivery.status}</td>
+                            <td className="px-4 py-2 text-sm">LKR {Number(delivery.total_value).toFixed(2)}</td>
+                            <td className="px-4 py-2 text-sm">
+                              {delivery.expenses && delivery.expenses.length > 0 ? (
+                                <button
+                                  className="btn btn-xs btn-outline"
+                                  onClick={() => setHistoryDeliveries((prev: any[]) => prev.map((d, i) => i === idx ? { ...d, _showExpenses: !d._showExpenses } : d))}
+                                >
+                                  {delivery._showExpenses ? 'Hide' : 'Show'} ({delivery.expenses.length})
+                                </button>
+                              ) : (
+                                <span className="text-gray-400">None</span>
+                              )}
+                            </td>
+                          </tr>
+                          {delivery._showExpenses && delivery.expenses && delivery.expenses.length > 0 && (
+                            <tr>
+                              <td colSpan={5} className="px-4 pb-4">
+                                <div className="bg-gray-50 rounded-lg p-3">
+                                  <table className="min-w-full text-xs">
+                                    <thead>
+                                      <tr>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-500">Category</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-500">Amount</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-500">Ref ID</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-500">Notes</th>
+                                        <th className="px-2 py-1 text-left font-medium text-gray-500">Created</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {delivery.expenses.map((exp: any) => (
+                                        <tr key={exp.id}>
+                                          <td className="px-2 py-1">{exp.category}</td>
+                                          <td className="px-2 py-1">LKR {Number(exp.amount).toFixed(2)}</td>
+                                          <td className="px-2 py-1">{exp.ref_id || '-'}</td>
+                                          <td className="px-2 py-1">{exp.notes || '-'}</td>
+                                          <td className="px-2 py-1">{new Date(exp.created_at).toLocaleDateString()}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+              ) : (
+                historySettlements.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500">No settlements found.</div>
+                ) : (
+                  <table className="min-w-full divide-y divide-gray-200 mb-6">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Settlement #</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delivered</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sold</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Returned</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {historySettlements.map((settlement: any) => (
+                        <tr key={settlement.id}>
+                          <td className="px-4 py-2 text-sm">{settlement.settlement_number}</td>
+                          <td className="px-4 py-2 text-sm">{new Date(settlement.settlement_date).toLocaleDateString()}</td>
+                          <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_delivered_value).toFixed(2)}</td>
+                          <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_sold_value).toFixed(2)}</td>
+                          <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_returned_value).toFixed(2)}</td>
+                          <td className="px-4 py-2 text-sm">{settlement.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+              )}
+            </div>
+          </div>
         )}
       </div>
     </Layout>
   );
-};
-
-// Helper function for status badges
-const getStatusBadge = (status: string) => {
-  switch (status) {
-    case 'pending':
-      return (
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-          <Clock className="w-3 h-3 mr-1" />
-          Pending
-        </span>
-      );
-    case 'delivered':
-      return (
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-          <CheckCircle className="w-3 h-3 mr-1" />
-          Delivered
-        </span>
-      );
-    case 'settled':
-      return (
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-          <CheckCircle className="w-3 h-3 mr-1" />
-          Settled
-        </span>
-      );
-    case 'cancelled':
-      return (
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-          Cancelled
-        </span>
-      );
-    default:
-      return (
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-          {status}
-        </span>
-      );
-  }
 };
 
 // Salesman-Centric View Component
@@ -331,6 +318,7 @@ const SalesmanCentricView: React.FC<{
   onViewSalesmanDetails: (salesmanId: number) => void;
   onSettleSalesman: (salesmanId: number, notes?: string) => void;
   isSettling: number | null;
+  onShowHistory: (salesman: any) => void;
 }> = ({ 
   salesmanOverview, 
   settlementQueue, 
@@ -339,8 +327,22 @@ const SalesmanCentricView: React.FC<{
   setSelectedView, 
   onViewSalesmanDetails, 
   onSettleSalesman, 
-  isSettling 
+  isSettling, 
+  onShowHistory 
 }) => {
+  const { user } = useAuth();
+  const [salesmen, setSalesmen] = useState<any[]>([]);
+  const [isSalesmenLoading, setIsSalesmenLoading] = useState(false);
+  useEffect(() => {
+    setIsSalesmenLoading(true);
+    import('../services/apiServices').then(({ salesmanService }) => {
+      salesmanService.getSalesmen().then((data: any) => {
+        setSalesmen(data.results || data);
+        setIsSalesmenLoading(false);
+      }).catch(() => setIsSalesmenLoading(false));
+    });
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
@@ -403,8 +405,8 @@ const SalesmanCentricView: React.FC<{
         <nav className="-mb-px flex space-x-8">
           {[
             { id: 'overview', label: 'Stock Overview', icon: Package },
-            { id: 'settlement', label: 'Settlement Queue', icon: Calculator },
-            { id: 'summary', label: 'Daily Summary', icon: BarChart3 }
+            { id: 'settlement', label: 'Settlement History', icon: Calculator },
+           
           ].map((tab) => (
             <button
               key={tab.id}
@@ -427,15 +429,13 @@ const SalesmanCentricView: React.FC<{
         <SalesmanStockOverview 
           data={salesmanOverview} 
           onViewDetails={onViewSalesmanDetails}
+          onShowHistory={onShowHistory}
         />
       )}
 
       {selectedView === 'settlement' && (
-        <SettlementQueue 
-          data={settlementQueue} 
-          onSettle={onSettleSalesman}
-          onViewDetails={onViewSalesmanDetails}
-          isSettling={isSettling}
+        <SettlementHistoryFull
+          salesmen={salesmen}
         />
       )}
 
@@ -451,451 +451,12 @@ const SalesmanCentricView: React.FC<{
   );
 };
 
-// Legacy Delivery View Component
-const LegacyDeliveryView: React.FC<{
-  deliveries: Delivery[];
-  user: any;
-  onViewDetails: (delivery: Delivery) => void;
-  onMarkAsDelivered: (id: number) => void;
-  onStartSettlement: (id: number) => void;
-}> = ({ deliveries, user, onViewDetails, onMarkAsDelivered, onStartSettlement }) => {
-  return (
-    <>
-      {/* Deliveries Grid */}
-      {deliveries.length === 0 ? (
-        <div className="text-center py-12">
-          <Truck className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 mb-2">No deliveries yet</h3>
-          <p className="text-gray-600 mb-6">Start by creating your first product delivery to salesmen</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {deliveries.map((delivery) => (
-            <DeliveryCard
-              key={delivery.id}
-              delivery={delivery}
-              user={user}
-              onViewDetails={onViewDetails}
-              onMarkAsDelivered={onMarkAsDelivered}
-              onStartSettlement={onStartSettlement}
-              getStatusBadge={getStatusBadge}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  );
-};
-
-// Delivery Card Component
-const DeliveryCard: React.FC<{
-  delivery: Delivery;
-  user: any;
-  onViewDetails: (delivery: Delivery) => void;
-  onMarkAsDelivered: (id: number) => void;
-  onStartSettlement: (id: number) => void;
-  getStatusBadge: (status: string) => JSX.Element;
-}> = ({ delivery, user, onViewDetails, onMarkAsDelivered, onStartSettlement, getStatusBadge }) => {
-  const [remainingStock, setRemainingStock] = useState<{ [key: number]: number }>({});
-  const [isLoadingStock, setIsLoadingStock] = useState(false);
-
-  useEffect(() => {
-    if (delivery.status === 'delivered') {
-      loadRemainingStock();
-    }
-  }, [delivery.id, delivery.status]);
-
-  const loadRemainingStock = async () => {
-    try {
-      setIsLoadingStock(true);
-      const settlementData = await deliveryService.getSettlementData(delivery.id!);
-      const stockMap: { [key: number]: number } = {};
-      settlementData.items.forEach(item => {
-        stockMap[item.product_id] = item.remaining_quantity;
-      });
-      setRemainingStock(stockMap);
-    } catch (error) {
-      console.error('Error loading remaining stock:', error);
-      // Don't show toast error for this as it's a background operation
-    } finally {
-      setIsLoadingStock(false);
-    }
-  };
-
-  const getTotalRemainingStock = () => {
-    return Object.values(remainingStock).reduce((total, stock) => total + stock, 0);
-  };
-
-  const hasRemainingStock = () => {
-    return getTotalRemainingStock() > 0;
-  };
-
-  return (
-    <div className="card p-6 hover:shadow-lg transition-shadow">
-      <div className="flex justify-between items-start mb-4">
-        <div className="flex items-center space-x-3">
-          <div className="p-2 bg-blue-100 rounded-lg">
-            <Package className="w-5 h-5 text-blue-600" />
-          </div>
-          <div>
-            <h3 className="font-semibold text-gray-900">
-              Delivery #{delivery.id}
-            </h3>
-            <p className="text-sm text-gray-600">
-              To: {delivery.salesman_name}
-            </p>
-          </div>
-        </div>
-        {getStatusBadge(delivery.status)}
-      </div>
-
-      <div className="space-y-3">
-        <div className="flex items-center text-sm text-gray-600">
-          <Calendar className="w-4 h-4 mr-2" />
-          <span>{new Date(delivery.delivery_date).toLocaleDateString()}</span>
-        </div>
-        
-        <div className="flex items-center text-sm text-gray-600">
-          <Package className="w-4 h-4 mr-2" />
-          <span>{delivery.total_items || delivery.items?.length || 0} items</span>
-        </div>
-
-        {/* Show remaining stock for delivered deliveries */}
-        {delivery.status === 'delivered' && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3">
-            <div className="flex items-center space-x-2 mb-2">
-              <Package className="w-4 h-4 text-yellow-600" />
-              <span className="text-sm font-medium text-yellow-800">Remaining Stock</span>
-              {isLoadingStock && (
-                <div className="w-3 h-3 border-2 border-yellow-600 border-t-transparent rounded-full animate-spin" />
-              )}
-            </div>
-            {isLoadingStock ? (
-              <p className="text-xs text-yellow-600">Loading stock data...</p>
-            ) : hasRemainingStock() ? (
-              <div>
-                <p className="text-sm font-semibold text-yellow-900">
-                  {getTotalRemainingStock()} units pending return
-                </p>
-                <div className="mt-1 space-y-1">
-                  {Object.entries(remainingStock).map(([productId, stock]) => {
-                    if (stock > 0) {
-                      const item = delivery.items?.find(i => i.product?.toString() === productId);
-                      return (
-                        <p key={productId} className="text-xs text-yellow-700">
-                          {item?.product_name || `Product ${productId}`}: {stock} units
-                        </p>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-yellow-600">All stock sold or settled</p>
-            )}
-          </div>
-        )}
-
-        {/* Show settlement info for settled deliveries */}
-        {delivery.status === 'settled' && delivery.total_margin_earned && (
-          <div className="bg-green-50 border border-green-200 rounded-md p-3">
-            <div className="flex items-center space-x-2 mb-1">
-              <DollarSign className="w-4 h-4 text-green-600" />
-              <span className="text-sm font-medium text-green-800">Settled</span>
-            </div>
-            <p className="text-sm font-semibold text-green-900">
-              Margin: LKR {delivery.total_margin_earned.toFixed(2)}
-            </p>
-            {delivery.settlement_date && (
-              <p className="text-xs text-green-600">
-                On {new Date(delivery.settlement_date).toLocaleDateString()}
-              </p>
-            )}
-          </div>
-        )}
-
-        {delivery.notes && (
-          <p className="text-sm text-gray-600 bg-gray-50 p-2 rounded">
-            {delivery.notes}
-          </p>
-        )}
-      </div>
-
-      <div className="mt-6 flex space-x-2">
-        <button
-          onClick={() => onViewDetails(delivery)}
-          className="flex-1 btn btn-outline btn-sm flex items-center justify-center space-x-1"
-        >
-          <Eye className="w-4 h-4" />
-          <span>View</span>
-        </button>
-        
-        {delivery.status === 'pending' && user?.role === 'owner' && (
-          <button
-            onClick={() => onMarkAsDelivered(delivery.id!)}
-            className="flex-1 btn btn-primary btn-sm flex items-center justify-center space-x-1"
-          >
-            <CheckCircle className="w-4 h-4" />
-            <span>Mark Delivered</span>
-          </button>
-        )}
-
-        {delivery.status === 'delivered' && user?.role === 'owner' && (
-          <button
-            onClick={() => onStartSettlement(delivery.id!)}
-            className="flex-1 btn btn-success btn-sm flex items-center justify-center space-x-1"
-          >
-            <Calculator className="w-4 h-4" />
-            <span>Settle</span>
-          </button>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// Delivery Details Modal Component
-const DeliveryDetailsModal: React.FC<{
-  delivery: Delivery;
-  isOpen: boolean;
-  onClose: () => void;
-}> = ({ delivery, isOpen, onClose }) => {
-  const [batchAssignments, setBatchAssignments] = useState<any>(null);
-  const [isLoadingBatches, setIsLoadingBatches] = useState(false);
-
-  useEffect(() => {
-    if (isOpen && delivery.id) {
-      loadBatchAssignments();
-    }
-  }, [isOpen, delivery.id]);
-
-  const loadBatchAssignments = async () => {
-    try {
-      setIsLoadingBatches(true);
-      const batchData = await deliveryService.getBatchAssignments(delivery.id!);
-      setBatchAssignments(batchData);
-    } catch (error) {
-      console.error('Error loading batch assignments:', error);
-      toast.error('Failed to load batch assignments');
-    } finally {
-      setIsLoadingBatches(false);
-    }
-  };
-
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-xl font-bold">Delivery Details #{delivery.id}</h2>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="space-y-6">
-          {/* Delivery Info */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-sm font-medium text-gray-600">Salesman</label>
-              <p className="text-gray-900">{delivery.salesman_name}</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-gray-600">Delivery Date</label>
-              <p className="text-gray-900">{new Date(delivery.delivery_date).toLocaleDateString()}</p>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-gray-600">Status</label>
-              <div className="mt-1">
-                {delivery.status === 'pending' ? (
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
-                    <Clock className="w-3 h-3 mr-1" />
-                    Pending
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                    <CheckCircle className="w-3 h-3 mr-1" />
-                    Delivered
-                  </span>
-                )}
-              </div>
-            </div>
-            <div>
-              <label className="text-sm font-medium text-gray-600">Created By</label>
-              <p className="text-gray-900">{delivery.created_by_name}</p>
-            </div>
-          </div>
-
-          {delivery.notes && (
-            <div>
-              <label className="text-sm font-medium text-gray-600">Notes</label>
-              <p className="text-gray-900 bg-gray-50 p-3 rounded">{delivery.notes}</p>
-            </div>
-          )}
-
-          {/* Delivery Items */}
-          <div>
-            <h3 className="text-lg font-semibold mb-4">Items</h3>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Price</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Value</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {delivery.items.map((item, index) => (
-                    <tr key={index}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{item.product_name}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.product_sku}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.quantity}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">LKR {Number(item.unit_price || 0).toFixed(2)}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">LKR {(item.quantity * Number(item.unit_price || 0)).toFixed(2)}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{item.notes || '-'}</td>
-        
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr>
-                    <td colSpan={4} className="px-6 py-4 text-right font-bold text-gray-700">Delivery Total:</td>
-                    <td className="px-6 py-4 font-bold text-lg text-green-700">LKR {delivery.items.reduce((sum, item) => sum + (item.quantity * Number(item.unit_price || 0)), 0).toFixed(2)}</td>
-                    <td></td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </div>
-
-          {/* Batch Assignments */}
-          {delivery.batch_assignments && delivery.batch_assignments.length > 0 && (
-            <div>
-              <h3 className="text-lg font-semibold mb-4">Batch Assignments</h3>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Batch #
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Product
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Quantity
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Unit Cost
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Expiry Date
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Status
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {delivery.batch_assignments.map((batch, index) => (
-                      <tr key={index} className="hover:bg-gray-50">
-                        <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {batch.batch_number}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {batch.product_name}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          <div className="space-y-1">
-                            <div>Assigned: <span className="font-medium">{batch.quantity}</span></div>
-                            <div className="text-xs text-gray-500">
-                              Delivered: {batch.delivered_quantity} | 
-                              Outstanding: {batch.outstanding_quantity}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          ${parseFloat(batch.unit_cost.toString()).toFixed(2)}
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                          <div className="space-y-1">
-                            <div>{new Date(batch.expiry_date).toLocaleDateString()}</div>
-                            <div className="text-xs text-gray-500">
-                              Mfg: {new Date(batch.manufacturing_date).toLocaleDateString()}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                            batch.status === 'assigned' ? 'bg-blue-100 text-blue-800' :
-                            batch.status === 'delivered' ? 'bg-green-100 text-green-800' :
-                            batch.status === 'partially_delivered' ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-gray-100 text-gray-800'
-                          }`}>
-                            {batch.status.replace('_', ' ').toUpperCase()}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              
-              {/* Batch Summary */}
-              <div className="mt-4 bg-gray-50 p-4 rounded-lg">
-                <h4 className="text-sm font-medium text-gray-700 mb-2">Batch Summary</h4>
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <span className="text-gray-600">Total Batches:</span>
-                    <span className="ml-2 font-medium">{delivery.batch_assignments.length}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-600">Total Assigned:</span>
-                    <span className="ml-2 font-medium">
-                      {delivery.batch_assignments.reduce((sum, batch) => sum + batch.quantity, 0)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-600">Total Value:</span>
-                    <span className="ml-2 font-medium">
-                      ${delivery.batch_assignments.reduce((sum, batch) => 
-                        sum + (batch.quantity * parseFloat(batch.unit_cost.toString())), 0
-                      ).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex justify-end mt-6">
-          <button
-            onClick={onClose}
-            className="btn btn-outline"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 // Salesman Stock Overview Component
 const SalesmanStockOverview: React.FC<{
   data: any;
   onViewDetails: (salesmanId: number) => void;
-}> = ({ data, onViewDetails }) => {
+  onShowHistory: (salesman: any) => void;
+}> = ({ data, onViewDetails, onShowHistory }) => {
   if (!data?.salesmen?.length) {
     return (
       <div className="text-center py-12">
@@ -913,14 +474,17 @@ const SalesmanStockOverview: React.FC<{
           <div className="flex justify-between items-start mb-4">
             <div className="flex items-center space-x-3">
               <div className="p-2 bg-blue-100 rounded-lg">
-                <User className="w-5 h-5 text-blue-600" />
+                <Users className="w-5 h-5 text-blue-600" />
               </div>
               <div>
-                <h3 className="font-semibold text-gray-900">
+                <h3
+                  className="font-semibold text-gray-900 cursor-pointer hover:underline"
+                  onClick={() => onShowHistory(salesman)}
+                >
                   {salesman.salesman_name}
                 </h3>
                 <p className="text-sm text-gray-600 flex items-center">
-                  <Phone className="w-3 h-3 mr-1" />
+                  <Mail className="w-3 h-3 mr-1" />
                   {salesman.salesman_phone}
                 </p>
               </div>
@@ -1002,119 +566,7 @@ const SalesmanStockOverview: React.FC<{
 };
 
 // Settlement Queue Component
-const SettlementQueue: React.FC<{
-  data: any;
-  onSettle: (salesmanId: number, notes?: string) => void;
-  onViewDetails: (salesmanId: number) => void;
-  isSettling: number | null;
-}> = ({ data, onSettle, onViewDetails, isSettling }) => {
-  if (!data?.salesmen?.length) {
-    return (
-      <div className="text-center py-12">
-        <CheckCircle className="w-16 h-16 text-green-300 mx-auto mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">All settled!</h3>
-        <p className="text-gray-600">No deliveries pending settlement</p>
-      </div>
-    );
-  }
 
-  return (
-    <div className="space-y-6">
-      {data.salesmen.map((salesman: any) => (
-        <div key={salesman.salesman_id} className="card p-6">
-          <div className="flex justify-between items-start mb-4">
-            <div className="flex items-center space-x-3">
-              <div className="p-2 bg-orange-100 rounded-lg">
-                <User className="w-5 h-5 text-orange-600" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900">
-                  {salesman.salesman_name}
-                </h3>
-                <p className="text-sm text-gray-600">
-                  {salesman.total_deliveries} deliveries pending settlement
-                </p>
-              </div>
-            </div>
-            
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => onViewDetails(salesman.salesman_id)}
-                className="btn btn-outline btn-sm"
-              >
-                <Eye className="w-4 h-4 mr-1" />
-                Details
-              </button>
-              
-              <button
-                onClick={() => onSettle(salesman.salesman_id)}
-                disabled={isSettling === salesman.salesman_id}
-                className="btn btn-primary btn-sm flex items-center space-x-1"
-              >
-                {isSettling === salesman.salesman_id ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Calculator className="w-4 h-4" />
-                )}
-                <span>Settle All</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-orange-50 rounded-lg p-4 mb-4">
-            <div className="flex justify-between items-center">
-              <div>
-                <p className="text-sm font-medium text-orange-800">
-                  Outstanding Value
-                </p>
-                <p className="text-xl font-bold text-orange-900">
-                  LKR {salesman.total_outstanding_value.toFixed(2)}
-                </p>
-              </div>
-              <AlertTriangle className="w-6 h-6 text-orange-600" />
-            </div>
-            {salesman.oldest_delivery_date && (
-              <p className="text-xs text-orange-700 mt-1">
-                Oldest delivery: {new Date(salesman.oldest_delivery_date).toLocaleDateString()}
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-3">
-            {salesman.deliveries.slice(0, 2).map((delivery: any) => (
-              <div key={delivery.delivery_id} className="border border-gray-200 rounded-lg p-3">
-                <div className="flex justify-between items-start mb-2">
-                  <div>
-                    <h4 className="font-medium text-gray-900">
-                      {delivery.delivery_number}
-                    </h4>
-                    <p className="text-sm text-gray-600">
-                      {new Date(delivery.delivery_date).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-medium text-gray-900">
-                      {delivery.outstanding_quantity} items
-                    </p>
-                    <p className="text-sm text-gray-600">
-                      LKR {delivery.outstanding_value.toFixed(2)}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ))}
-            
-            {salesman.deliveries.length > 2 && (
-              <p className="text-sm text-gray-500 text-center">
-                +{salesman.deliveries.length - 2} more deliveries...
-              </p>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-};
 
 // Daily Summary Component
 const DailySummary: React.FC<{
@@ -1250,14 +702,155 @@ const DailySummary: React.FC<{
 };
 
 // Salesman Details Modal Component
-const SalesmanDetailsModal: React.FC<{
+interface SalesmanDetailsModalProps {
   salesman: any;
   isOpen: boolean;
   onClose: () => void;
-  onSettle: (salesmanId: number, notes?: string) => void;
+  onSettle: (salesmanId: number, notes?: string, deliveryId?: number, netCash?: number) => void;
   isSettling: number | null;
-}> = ({ salesman, isOpen, onClose, onSettle, isSettling }) => {
-  if (!isOpen) return null;
+  activeDeliveryId?: number;
+  user: any;
+}
+
+const SalesmanDetailsModal: React.FC<SalesmanDetailsModalProps> = function SalesmanDetailsModal({
+  salesman,
+  isOpen,
+  onClose,
+  onSettle,
+  isSettling,
+  activeDeliveryId,
+  user
+}) {
+  // Always show details for the active delivery (default to most recent)
+  const deliveryList = salesman.deliveries?.recent_deliveries || [];
+  const defaultDeliveryId = activeDeliveryId || (deliveryList.length > 0 ? deliveryList[0].id : null);
+  const [expenses, setExpenses] = useState<any[]>([]);
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<any | null>(null);
+  const [expenseForm, setExpenseForm] = useState({
+    category: '',
+    amount: '',
+    ref_id: '',
+    notes: ''
+  });
+  const [expenseError, setExpenseError] = useState('');
+  const expenseCategories = [
+    { value: 'food', label: 'Food' },
+    { value: 'transportation', label: 'Transportation' },
+    { value: 'labour', label: 'Labour' },
+    { value: 'accommodation', label: 'Accommodation' },
+    { value: 'other', label: 'Other' },
+  ];
+  const isOwner = user?.role === 'owner';
+  const [isSavingExpense, setIsSavingExpense] = useState(false);
+  const categoryRef = React.useRef<HTMLSelectElement>(null);
+
+  // Find the active delivery object
+  const activeDelivery = deliveryList.find((d: any) => d.id === defaultDeliveryId) || null;
+
+  // Load expenses for the active delivery
+  useEffect(() => {
+    if (activeDelivery) {
+      deliveryService.getDeliveryExpenses(activeDelivery.id).then((res: any) => {
+        setExpenses(res.results || res);
+      });
+    }
+  }, [activeDelivery?.id]);
+
+  useEffect(() => {
+    if (isExpenseModalOpen && categoryRef.current) {
+      categoryRef.current.focus();
+    }
+  }, [isExpenseModalOpen]);
+
+  const handleOpenAddExpense = () => {
+    setEditingExpense(null);
+    setExpenseForm({ category: '', amount: '', ref_id: '', notes: '' });
+    setExpenseError('');
+    setIsExpenseModalOpen(true);
+  };
+  const handleOpenEditExpense = (expense: any) => {
+    setEditingExpense(expense);
+    setExpenseForm({
+      category: expense.category,
+      amount: expense.amount.toString(),
+      ref_id: expense.ref_id || '',
+      notes: expense.notes || ''
+    });
+    setExpenseError('');
+    setIsExpenseModalOpen(true);
+  };
+  const handleCloseExpenseModal = () => {
+    setIsExpenseModalOpen(false);
+    setExpenseForm({ category: '', amount: '', ref_id: '', notes: '' });
+    setExpenseError('');
+    setEditingExpense(null);
+  };
+  const handleDeleteExpense = async (id: number) => {
+    if (!window.confirm('Delete this expense?')) return;
+    try {
+      await deliveryService.deleteDeliveryExpense(id);
+      setExpenses((prev) => prev.filter((e: any) => e.id !== id));
+      toast.success('Expense deleted');
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Failed to delete expense');
+    }
+  };
+  const handleExpenseFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    if (e.target.name === 'amount') {
+      // Prevent negative values
+      if (e.target.value && parseFloat(e.target.value) < 0) return;
+    }
+    setExpenseForm({ ...expenseForm, [e.target.name]: e.target.value });
+  };
+  const handleSaveExpense = async () => {
+    setExpenseError('');
+    if (!expenseForm.category) {
+      setExpenseError('Category is required');
+      return;
+    }
+    const amount = parseFloat(expenseForm.amount);
+    if (!amount || amount <= 0) {
+      setExpenseError('Amount must be greater than zero');
+      return;
+    }
+    if (!activeDelivery) {
+      setExpenseError('No delivery selected');
+      return;
+    }
+    const data = {
+      delivery: activeDelivery.id,
+      category: expenseForm.category,
+      amount,
+      ref_id: expenseForm.ref_id || undefined,
+      notes: expenseForm.notes || undefined
+    };
+    setIsSavingExpense(true);
+    try {
+      if (editingExpense) {
+        const updated = await deliveryService.updateDeliveryExpense(editingExpense.id, data) as any;
+        setExpenses((prev) => prev.map((e: any) => e.id === editingExpense.id ? updated : e));
+        toast.success('Expense updated');
+      } else {
+        const created = await deliveryService.createDeliveryExpense(data) as any;
+        setExpenses((prev) => [...prev, created]);
+        toast.success('Expense added');
+      }
+      setIsExpenseModalOpen(false);
+      setExpenseForm({ category: '', amount: '', ref_id: '', notes: '' });
+      setEditingExpense(null);
+    } catch (err: any) {
+      setExpenseError(err.response?.data?.detail || 'Failed to save expense');
+    } finally {
+      setIsSavingExpense(false);
+    }
+  };
+
+  if (!isOpen || !activeDelivery) return null;
+
+  const deliveryTotal = activeDelivery.items?.reduce((sum: number, item: any) => sum + (item.quantity * Number(item.unit_price || 0)), 0) || 0;
+  const totalExpenses = expenses.reduce((sum: number, e: any) => sum + Number(e.amount), 0);
+  const netCash = deliveryTotal - totalExpenses;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -1270,7 +863,7 @@ const SalesmanDetailsModal: React.FC<{
               </h2>
               <div className="flex items-center space-x-4 mt-1 text-sm text-gray-600">
                 <span className="flex items-center">
-                  <Phone className="w-4 h-4 mr-1" />
+                  <Mail className="w-4 h-4 mr-1" />
                   {salesman.salesman.phone}
                 </span>
                 <span className="flex items-center">
@@ -1279,25 +872,9 @@ const SalesmanDetailsModal: React.FC<{
                 </span>
               </div>
             </div>
-            <div className="flex items-center space-x-2">
-              {salesman.current_stock.total_value > 0 && (
-                <button
-                  onClick={() => onSettle(salesman.salesman.id)}
-                  disabled={isSettling === salesman.salesman.id}
-                  className="btn btn-primary btn-sm flex items-center space-x-1"
-                >
-                  {isSettling === salesman.salesman.id ? (
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <Calculator className="w-4 h-4" />
-                  )}
-                  <span>Settle All</span>
-                </button>
-              )}
-              <button onClick={onClose} className="btn btn-outline btn-sm">
-                Close
-              </button>
-            </div>
+            <button onClick={onClose} className="btn btn-outline btn-sm">
+              Close
+            </button>
           </div>
         </div>
 
@@ -1380,9 +957,196 @@ const SalesmanDetailsModal: React.FC<{
                 </div>
               </div>
             )}
-          </div>         
+          </div>
+
+          {/* Delivery Expense Management Section - Only for active delivery */}
+          <div>
+            <h3 className="text-lg font-semibold mb-4">Delivery Expense Management</h3>
+            <div className="flex items-center mb-2">
+              <h4 className="text-md font-semibold flex items-center mb-0">Expenses</h4>
+              {isOwner && (
+                <button className="ml-4 btn btn-outline btn-xs" onClick={handleOpenAddExpense}>Add Expense</button>
+              )}
+            </div>
+            {expenses.length === 0 ? (
+              <p className="text-gray-500">No expenses recorded for this delivery.</p>
+            ) : (
+              <div className="overflow-x-auto mb-2">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delivery ID</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Ref ID</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Notes</th>
+                      {isOwner && <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {expenses.map((exp: any) => (
+                      <tr key={exp.id}>
+                        <td className="px-4 py-2 text-sm">{exp.delivery}</td>
+                        <td className="px-4 py-2 text-sm">{expenseCategories.find(c => c.value === exp.category)?.label || exp.category}</td>
+                        <td className="px-4 py-2 text-sm">LKR {Number(exp.amount).toFixed(2)}</td>
+                        <td className="px-4 py-2 text-sm">{exp.ref_id || '-'}</td>
+                        <td className="px-4 py-2 text-sm">{exp.notes || '-'}</td>
+                        {isOwner && <td className="px-4 py-2 text-sm">
+                          <button className="btn btn-xs btn-outline mr-2" onClick={() => handleOpenEditExpense(exp)}>Edit</button>
+                          <button className="btn btn-xs btn-danger" onClick={() => handleDeleteExpense(exp.id)}>Delete</button>
+                        </td>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex flex-col items-end space-y-2 mt-2">
+              <div className="font-medium text-gray-700">Total Expenses: <span className="font-bold">LKR {totalExpenses.toFixed(2)}</span></div>
+              <div className={`font-medium ${netCash < 0 ? 'text-red-600' : 'text-green-700'}`}>Net Cash to Collect: <span className="font-bold">LKR {netCash.toFixed(2)}</span></div>
+              {isOwner && (
+                <button
+                  className="btn btn-primary mt-2"
+                  disabled={isSettling === activeDelivery.id}
+                  onClick={() => onSettle(salesman.salesman.id, '', activeDelivery.id, netCash)}
+                >
+                  {isSettling === activeDelivery.id ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Calculator className="w-4 h-4" />
+                  )}
+                  <span>Settle Delivery</span>
+                </button>
+              )}
+            </div>
+          </div>
         </div>
+
+        {/* Expense Modal */}
+        {isExpenseModalOpen && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 w-full max-w-md">
+              <h3 className="text-lg font-semibold mb-4">{editingExpense ? 'Edit Expense' : 'Add Expense'}</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Category *</label>
+                  <select
+                    name="category"
+                    value={expenseForm.category}
+                    onChange={handleExpenseFormChange}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    ref={categoryRef}
+                  >
+                    <option value="">Select Category</option>
+                    {expenseCategories.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount *</label>
+                  <input
+                    name="amount"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={expenseForm.amount}
+                    onChange={handleExpenseFormChange}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Ref ID</label>
+                  <input name="ref_id" type="text" value={expenseForm.ref_id} onChange={handleExpenseFormChange} className="w-full px-3 py-2 border border-gray-300 rounded-md" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <textarea name="notes" value={expenseForm.notes} onChange={handleExpenseFormChange} className="w-full px-3 py-2 border border-gray-300 rounded-md" />
+                </div>
+                {expenseError && <div className="text-red-600 text-sm">{expenseError}</div>}
+              </div>
+              <div className="flex justify-end space-x-3 mt-6">
+                <button className="btn btn-outline" onClick={handleCloseExpenseModal} disabled={isSavingExpense}>Cancel</button>
+                <button className="btn btn-primary" onClick={handleSaveExpense} disabled={isSavingExpense}>{editingExpense ? 'Update' : 'Add'}</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+    </div>
+  );
+};
+
+// Add the SettlementHistoryFull component
+const SettlementHistoryFull: React.FC<{ salesmen: any[] }> = ({ salesmen }) => {
+  const [selectedSalesman, setSelectedSalesman] = useState<any | null>(null);
+  const [settlements, setSettlements] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedSalesman) {
+      setIsLoading(true);
+      setError(null);
+      deliveryService.getSettlementHistory(selectedSalesman.id)
+        .then((data: any) => setSettlements(data.results || data))
+        .catch(() => setError('Failed to load settlement history.'))
+        .finally(() => setIsLoading(false));
+    } else {
+      setSettlements([]);
+    }
+  }, [selectedSalesman]);
+
+  return (
+    <div className="max-w-3xl mx-auto">
+      <div className="mb-4 flex items-center space-x-2">
+        <label className="font-medium text-gray-700">Select Salesman:</label>
+        <select
+          className="border px-2 py-1 rounded"
+          value={selectedSalesman?.id || ''}
+          onChange={e => {
+            const id = Number(e.target.value) || null;
+            setSelectedSalesman(salesmen.find(s => s.id === id) || null);
+          }}
+        >
+          <option value="">-- Select --</option>
+          {salesmen.map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+      </div>
+      {isLoading ? (
+        <div className="text-center py-8"><LoadingSpinner /></div>
+      ) : error ? (
+        <div className="text-center text-red-600 py-8">{error}</div>
+      ) : settlements.length === 0 && selectedSalesman ? (
+        <div className="text-center py-8 text-gray-500">No settlements found for this salesman.</div>
+      ) : settlements.length === 0 ? (
+        <div className="text-center py-8 text-gray-500">Please select a salesman to view settlement history.</div>
+      ) : (
+        <table className="min-w-full divide-y divide-gray-200 mb-6">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Settlement #</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delivered</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sold</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Returned</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {settlements.map((settlement: any) => (
+              <tr key={settlement.id}>
+                <td className="px-4 py-2 text-sm">{settlement.settlement_number}</td>
+                <td className="px-4 py-2 text-sm">{new Date(settlement.settlement_date).toLocaleDateString()}</td>
+                <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_delivered_value).toFixed(2)}</td>
+                <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_sold_value).toFixed(2)}</td>
+                <td className="px-4 py-2 text-sm">LKR {Number(settlement.total_returned_value).toFixed(2)}</td>
+                <td className="px-4 py-2 text-sm">{settlement.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 };

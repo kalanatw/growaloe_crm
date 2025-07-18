@@ -12,13 +12,14 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 import logging
 
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, DeliveryExpense
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductCreateSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
     SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
     DeliveryItemSerializer, DeliverySettlementSerializer,
-    BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer
+    BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer,
+    DeliveryExpenseSerializer
 )
 from sales.serializers import BatchRecallSerializer
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
@@ -2814,5 +2815,19 @@ class BatchAssignmentViewSet(viewsets.ModelViewSet):
             'is_available': not exists,
             'message': 'Batch number already exists' if exists else 'Batch number is available'
         }, status=status.HTTP_200_OK)
+
+
+class DeliveryExpenseViewSet(viewsets.ModelViewSet):
+    queryset = DeliveryExpense.objects.all()
+    serializer_class = DeliveryExpenseSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['delivery', 'category']
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            permission_classes = [IsOwnerOrDeveloper]
+        else:
+            permission_classes = [IsAuthenticated]
+        return [permission() for permission in permission_classes]
 
 

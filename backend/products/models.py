@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from accounts.models import Owner, Salesman
+from django.core.validators import MinValueValidator
 
 User = get_user_model()
 
@@ -542,8 +543,8 @@ class DeliveryItem(models.Model):
         
         super().save(*args, **kwargs)
         
-        # Handle batch allocation when delivery item is created/updated
-        if is_new and self.delivery.status == 'pending':
+        # Always allocate stock for every new item
+        if is_new:
             self._allocate_stock_to_salesman()
     
     def delete(self, *args, **kwargs):
@@ -557,11 +558,12 @@ class DeliveryItem(models.Model):
         existing_assignments = BatchAssignment.objects.filter(
             delivery=self.delivery,
             salesman=self.delivery.salesman,
+            batch__product=self.product,
             notes__contains=f"Delivery: {self.delivery.delivery_number}"
         )
         
         if existing_assignments.exists():
-            # Allocation already exists, skip to prevent duplication
+            # Allocation already exists for this product, skip to prevent duplication
             return
             
         # Get available batches ordered by FIFO
@@ -617,10 +619,20 @@ class DeliveryItem(models.Model):
                 
                 remaining_to_allocate -= allocate_from_batch
         
-        # Mark delivery as delivered since stock is allocated
+        # Mark delivery as delivered if all items have been allocated
         if self.delivery.status == 'pending':
-            self.delivery.status = 'delivered'
-            self.delivery.save()
+            all_items_allocated = all(
+                BatchAssignment.objects.filter(
+                    delivery=self.delivery,
+                    salesman=self.delivery.salesman,
+                    batch__product=item.product,
+                    notes__contains=f"Delivery: {self.delivery.delivery_number}"
+                ).exists()
+                for item in self.delivery.items.all()
+            )
+            if all_items_allocated:
+                self.delivery.status = 'delivered'
+                self.delivery.save()
     
     def _deallocate_stock_from_salesman(self):
         """Deallocate stock assignments when delivery item is deleted"""
@@ -954,7 +966,7 @@ class DeliverySettlement(models.Model):
     
     class Meta:
         db_table = 'delivery_settlements'
-        unique_together = [['salesman', 'settlement_date']]
+        # Removed unique_together constraint to allow multiple settlements per day
         ordering = ['-settlement_date', '-created_at']
         indexes = [
             models.Index(fields=['salesman', 'settlement_date']),
@@ -967,22 +979,19 @@ class DeliverySettlement(models.Model):
     
     def save(self, *args, **kwargs):
         if not self.settlement_number:
-            # Generate settlement number (SET-YYYYMMDD-XXX)
-            date_str = self.settlement_date.strftime('%Y%m%d')
-            
-            # Find the latest settlement for this date
+            # Generate settlement number (SET-YYYYMMDD-HHMMSS-XXX)
+            now = timezone.now()
+            date_str = now.strftime('%Y%m%d-%H%M%S')
+            # Find the latest settlement for this date and time
             latest = DeliverySettlement.objects.filter(
                 settlement_number__startswith=f'SET-{date_str}'
             ).order_by('-settlement_number').first()
-            
             if latest:
                 # Extract sequence number and increment
                 sequence = int(latest.settlement_number.split('-')[-1]) + 1
             else:
                 sequence = 1
-                
             self.settlement_number = f'SET-{date_str}-{sequence:03d}'
-        
         super().save(*args, **kwargs)
     
     @property
@@ -1000,33 +1009,30 @@ class DeliverySettlementItem(models.Model):
     """
     settlement = models.ForeignKey(DeliverySettlement, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
-    
+    delivery = models.ForeignKey('Delivery', on_delete=models.CASCADE, related_name='settlement_items', null=True, blank=True)  # NEW: map to delivery
     # Quantities
     delivered_quantity = models.PositiveIntegerField()
     sold_quantity = models.PositiveIntegerField(default=0)
     returned_quantity = models.PositiveIntegerField(default=0)
-    
     # Values
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     delivered_value = models.DecimalField(max_digits=10, decimal_places=2)
     sold_value = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     returned_value = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    
     # Margin calculation
     margin_per_unit = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     total_margin_earned = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         db_table = 'delivery_settlement_items'
-        unique_together = [['settlement', 'product']]
+        unique_together = [['settlement', 'product', 'delivery']]  # updated for delivery mapping
         indexes = [
-            models.Index(fields=['settlement', 'product']),
+            models.Index(fields=['settlement', 'product', 'delivery']),
         ]
     
     def __str__(self):
-        return f"{self.settlement.settlement_number} - {self.product.name}"
+        return f"{self.settlement.settlement_number} - {self.product.name} (Delivery: {self.delivery_id})"
     
     def save(self, *args, **kwargs):
         # Auto-calculate values
@@ -1036,3 +1042,28 @@ class DeliverySettlementItem(models.Model):
         self.total_margin_earned = self.sold_quantity * self.margin_per_unit
         
         super().save(*args, **kwargs)
+
+
+class DeliveryExpense(models.Model):
+    CATEGORY_CHOICES = [
+        ('food', 'Food'),
+        ('transportation', 'Transportation'),
+        ('labour', 'Labour'),
+        ('accommodation', 'Accommodation'),
+        ('other', 'Other'),
+    ]
+    delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='expenses')
+    category = models.CharField(max_length=32, choices=CATEGORY_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    ref_id = models.CharField(max_length=64, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'delivery_expenses'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.delivery} - {self.category}: {self.amount}"
+
+# NOTE: You must create and apply a migration after this change.

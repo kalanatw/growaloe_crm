@@ -12,6 +12,7 @@ router.register(r'deliveries', views.DeliveryViewSet)
 router.register(r'delivery-items', views.DeliveryItemViewSet)
 router.register(r'batches', views.BatchViewSet)
 router.register(r'batch-assignments', views.BatchAssignmentViewSet, basename='batchassignment')
+router.register(r'delivery-expenses', views.DeliveryExpenseViewSet, basename='deliveryexpense')
 
 # New salesman-centric endpoints
 router.register(r'salesman-deliveries', salesman_views.SalesmanDeliveryViewSet, basename='salesmandeliveries')

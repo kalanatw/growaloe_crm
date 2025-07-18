@@ -736,18 +736,6 @@ class SettleSalesmanDeliveryView(APIView):
         create_settlement_record = serializer.validated_data.get('create_settlement_record', True)
         settlement_date = timezone.now().date()
         
-        # Check if settlement already exists for today
-        existing_settlement = DeliverySettlement.objects.filter(
-            salesman=salesman,
-            settlement_date=settlement_date
-        ).first()
-        
-        if existing_settlement:
-            return Response(
-                {'error': f'Settlement already exists for {settlement_date}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         with transaction.atomic():
             settlement_data = {
                 'total_delivered_value': 0,
@@ -766,12 +754,13 @@ class SettleSalesmanDeliveryView(APIView):
                 status__in=['delivered', 'partial']
             ).select_related('batch', 'batch__product')
             
+            # Aggregate settlement items by (product, delivery)
+            settlement_items_dict = {}
             for assignment in outstanding_assignments:
                 outstanding_qty = assignment.outstanding_quantity
-                
                 if outstanding_qty > 0:
                     product = assignment.batch.product
-                    
+                    delivery = assignment.delivery
                     # Calculate sold quantity from invoices
                     sold_qty = InvoiceItem.objects.filter(
                         invoice__salesman=salesman,
@@ -779,41 +768,46 @@ class SettleSalesmanDeliveryView(APIView):
                         invoice__invoice_date__gte=assignment.created_at,
                         invoice__status__in=['pending', 'paid', 'partial']
                     ).aggregate(total=Sum('quantity'))['total'] or 0
-                    
                     if return_all_stock:
-                        # Return the outstanding stock
                         assignment.returned_quantity += outstanding_qty
                         assignment.status = 'returned'
                         assignment.save()
-                        
-                        # Update batch current quantity (return to owner)
                         assignment.batch.current_quantity += outstanding_qty
                         assignment.batch.save()
-                    
-                    # Track settlement data
-                    delivery_item = DeliveryItem.objects.filter(delivery=assignment.delivery, product=product).first()
+                    delivery_item = DeliveryItem.objects.filter(delivery=delivery, product=product).first()
                     unit_price = float(delivery_item.unit_price) if delivery_item else float(product.base_price)
                     delivered_value = assignment.delivered_quantity * unit_price
                     sold_value = sold_qty * unit_price
                     returned_value = outstanding_qty * unit_price if return_all_stock else 0
-                    
+                    key = (product.id, delivery.id if delivery else None)
+                    if key not in settlement_items_dict:
+                        settlement_items_dict[key] = {
+                            'product': product,
+                            'delivered_quantity': 0,
+                            'sold_quantity': 0,
+                            'returned_quantity': 0,
+                            'unit_price': unit_price,
+                            'delivered_value': 0,
+                            'sold_value': 0,
+                            'returned_value': 0,
+                            'delivery': delivery
+                        }
+                    item = settlement_items_dict[key]
+                    item['delivered_quantity'] += assignment.delivered_quantity
+                    item['sold_quantity'] += sold_qty
+                    item['returned_quantity'] += outstanding_qty if return_all_stock else 0
+                    item['delivered_value'] += delivered_value
+                    item['sold_value'] += sold_value
+                    item['returned_value'] += returned_value
+                    # Update totals
                     settlement_data['total_delivered_value'] += delivered_value
                     settlement_data['total_sold_value'] += sold_value
                     settlement_data['total_returned_value'] += returned_value
                     settlement_data['total_delivered_items'] += assignment.delivered_quantity
                     settlement_data['total_sold_items'] += sold_qty
                     settlement_data['total_returned_items'] += outstanding_qty if return_all_stock else 0
-                    
-                    settlement_data['settlement_items'].append({
-                        'product': product,
-                        'delivered_quantity': assignment.delivered_quantity,
-                        'sold_quantity': sold_qty,
-                        'returned_quantity': outstanding_qty if return_all_stock else 0,
-                        'unit_price': float(product.base_price),
-                        'delivered_value': delivered_value,
-                        'sold_value': sold_value,
-                        'returned_value': returned_value
-                    })
+            # Convert dict to list
+            settlement_data['settlement_items'] = list(settlement_items_dict.values())
             
             # Create settlement record if requested
             settlement_record = None
@@ -844,7 +838,8 @@ class SettleSalesmanDeliveryView(APIView):
                         unit_price=item_data['unit_price'],
                         delivered_value=item_data['delivered_value'],
                         sold_value=item_data['sold_value'],
-                        returned_value=item_data['returned_value']
+                        returned_value=item_data['returned_value'],
+                        delivery=item_data.get('delivery')  # Pass delivery if available
                     )
             
             # Mark all delivered deliveries as settled

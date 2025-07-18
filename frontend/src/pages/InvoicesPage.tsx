@@ -196,10 +196,10 @@ export const InvoicesPage: React.FC = () => {
                   </button>
                 </div>
                 {expandedShopId === shop.id && (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                       <thead className="bg-gray-50 dark:bg-gray-900">
-                        <tr>
+                <tr>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Invoice</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Date</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Amount</th>
@@ -207,46 +207,46 @@ export const InvoicesPage: React.FC = () => {
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Outstanding</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
-                        </tr>
-                      </thead>
+                </tr>
+              </thead>
                       <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                         {shopInvoices.length === 0 ? (
                           <tr><td colSpan={7} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">No invoices for this shop.</td></tr>
                         ) : (
                           shopInvoices.map((invoice) => (
                             <tr key={invoice.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                              <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-6 py-4 whitespace-nowrap">
                                 <div className="text-sm font-medium text-gray-900 dark:text-white">{invoice.invoice_number}</div>
                                 <div className="text-sm text-gray-500 dark:text-gray-400">{invoice.items_count} items</div>
-                              </td>
+                      </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                                {format(new Date(invoice.invoice_date), 'MMM dd, yyyy')}
-                                {invoice.due_date && (
+                          {format(new Date(invoice.invoice_date), 'MMM dd, yyyy')}
+                        {invoice.due_date && (
                                   <div className="text-xs text-gray-500 dark:text-gray-400">Due: {format(new Date(invoice.due_date), 'MMM dd, yyyy')}</div>
-                                )}
-                              </td>
+                        )}
+                      </td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{formatCurrency(invoice.net_total)}</td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{formatCurrency(invoice.paid_amount)}</td>
                               <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-600">{formatCurrency(invoice.balance_due)}</td>
-                              <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-6 py-4 whitespace-nowrap">
                                 <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(invoice.status)}`}>{invoice.status}</span>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                <div className="flex items-center space-x-2">
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div className="flex items-center space-x-2">
                                   <Link to={`/invoices/${invoice.id}`} className="text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" title="View Invoice">
-                                    <Eye className="h-4 w-4" />
-                                  </Link>
+                            <Eye className="h-4 w-4" />
+                          </Link>
                                   <button onClick={() => handleDownloadPDF(invoice)} className="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700" title="Download PDF">
-                                    <Download className="h-4 w-4" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                            <Download className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
                 )}
               </div>
             );

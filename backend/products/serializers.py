@@ -4,7 +4,7 @@ from django.db.models import Sum
 from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem, DeliveryExpense
 from accounts.models import Salesman
 
 User = get_user_model()
@@ -222,6 +222,23 @@ class DeliveryBatchAssignmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'outstanding_quantity']
 
 
+class DeliveryExpenseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeliveryExpense
+        fields = ['id', 'delivery', 'category', 'amount', 'ref_id', 'notes', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def validate_category(self, value):
+        if not value:
+            raise serializers.ValidationError("Category is required.")
+        return value
+
+    def validate_amount(self, value):
+        if value == 0:
+            raise serializers.ValidationError("Amount must not be zero.")
+        return value
+
+
 class DeliverySerializer(serializers.ModelSerializer):
     items = DeliveryItemSerializer(many=True, read_only=True)
     batch_assignments = serializers.SerializerMethodField(read_only=True)
@@ -229,6 +246,7 @@ class DeliverySerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     total_items = serializers.SerializerMethodField(read_only=True)
     total_value = serializers.SerializerMethodField(read_only=True)
+    expenses = DeliveryExpenseSerializer(many=True, read_only=True)
     
     class Meta:
         model = Delivery
@@ -236,11 +254,11 @@ class DeliverySerializer(serializers.ModelSerializer):
             'id', 'delivery_number', 'salesman', 'salesman_name', 'status',
             'delivery_date', 'notes', 'created_by', 'created_by_name',
             'total_items', 'total_value', 'items', 'batch_assignments',
-            'created_at', 'updated_at'
+            'expenses', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'delivery_number', 'salesman_name', 'created_by_name',
-            'total_items', 'total_value', 'batch_assignments', 'created_at', 'updated_at'
+            'total_items', 'total_value', 'batch_assignments', 'expenses', 'created_at', 'updated_at'
         ]
     
     @extend_schema_field(DeliveryBatchAssignmentSerializer(many=True))
