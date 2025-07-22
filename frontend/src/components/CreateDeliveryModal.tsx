@@ -28,7 +28,11 @@ interface StockSummaryItem {
   product_id: number;
   product_name: string;
   product_sku: string;
-  total_quantity: number;
+  total_stock: number;
+  allocated_stock: number;
+  available_stock: number;
+  pending_returns: number;
+  salesmen_count: number;
 }
 
 export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
@@ -75,7 +79,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
         productService.getProducts(),
         productService.getProductStockSummary()
       ]);
-      
+
       setProducts(productsData.results.filter(p => p.is_active));
       setStockSummary(stockData.results || stockData);
     } catch (error) {
@@ -89,7 +93,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
   const handleFormSubmit = (data: DeliveryFormData) => {
     // Validate that at least one item is selected
     const validItems = data.items.filter(item => item.product > 0 && item.quantity > 0);
-    
+
     if (validItems.length === 0) {
       toast.error('Please add at least one product to the delivery');
       return;
@@ -122,7 +126,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
 
   const getAvailableStock = (productId: number) => {
     const stockItem = stockSummary.find(s => s.product_id === productId);
-    return stockItem ? stockItem.total_quantity : 0;
+    return stockItem ? stockItem.available_stock : 0;
   };
 
   if (!isOpen) return null;
@@ -156,7 +160,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                 Salesman *
               </label>
               <select
-                {...register('salesman', { 
+                {...register('salesman', {
                   required: 'Salesman is required',
                   valueAsNumber: true,
                 })}
@@ -271,7 +275,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                         {...register(`items.${index}.quantity`, {
                           required: 'Quantity is required',
                           min: { value: 1, message: 'Quantity must be at least 1' },
-                          max: { 
+                          max: {
                             value: getAvailableStock(watch(`items.${index}.product`) || 0),
                             message: `Quantity cannot exceed available stock (${getAvailableStock(watch(`items.${index}.product`) || 0)})`
                           },

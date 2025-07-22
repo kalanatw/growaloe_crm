@@ -177,7 +177,7 @@ class ShopSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def validate(self, data):
-        """Validate shop margin based on user permissions"""
+        """Validate shop margin and coordinates"""
         from core.models import CompanySettings
         
         request = self.context.get('request')
@@ -191,6 +191,19 @@ class ShopSerializer(serializers.ModelSerializer):
             if shop_margin > max_margin:
                 raise serializers.ValidationError({
                     'shop_margin': f'Salesmen cannot set shop margin above {max_margin}%. Current: {shop_margin}%'
+                })
+        
+        # Validate coordinate ranges (preserve raw Google Maps precision)
+        if 'latitude' in data and data['latitude'] is not None:
+            if not (-90 <= float(data['latitude']) <= 90):
+                raise serializers.ValidationError({
+                    'latitude': 'Latitude must be between -90 and 90 degrees'
+                })
+        
+        if 'longitude' in data and data['longitude'] is not None:
+            if not (-180 <= float(data['longitude']) <= 180):
+                raise serializers.ValidationError({
+                    'longitude': 'Longitude must be between -180 and 180 degrees'
                 })
         
         return data

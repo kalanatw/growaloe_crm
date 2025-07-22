@@ -2058,25 +2058,78 @@ class BatchReturnViewSet(viewsets.ModelViewSet):
                 )
             
             with transaction.atomic():
-                # Process returns first
-                created_returns = []
+                # Process returns - create ProductReturn records in pending state ONLY
+                created_product_returns = []
                 total_return_amount = Decimal('0')
                 
                 for return_data in returns_data:
-                    return_serializer = BatchReturnCreateSerializer(data=return_data, context={'request': request})
-                    if return_serializer.is_valid():
-                        return_obj = return_serializer.save()
-                        created_returns.append(return_obj)
-                        total_return_amount += return_obj.return_amount
+                    try:
+                        batch_id = return_data.get('batch')
+                        return_quantity = return_data.get('quantity', 0)
                         
-                        # Update batch quantities (return stock)
-                        batch = return_obj.batch
-                        batch.current_quantity += return_obj.quantity
-                        batch.save()
+                        # Find the batch assignment for this return - look for any assignment, not just delivered/partial
+                        batch_assignment = BatchAssignment.objects.filter(
+                            batch_id=batch_id,
+                            salesman=invoice.salesman
+                        ).first()
                         
-                    else:
+                        # Debug: Log the search for batch assignment
+                        logger.info(f"Settlement return processing: Looking for batch assignment - batch_id={batch_id}, salesman={invoice.salesman.id}")
+                        if batch_assignment:
+                            logger.info(f"Found existing batch assignment: id={batch_assignment.id}, status={batch_assignment.status}")
+                        else:
+                            logger.info(f"No existing batch assignment found, will create new one")
+                        
+                        # If no assignment exists, create a minimal one for return tracking only
+                        if not batch_assignment:
+                            from products.models import Batch
+                            try:
+                                batch = Batch.objects.get(id=batch_id)
+                                # Create a minimal assignment for return tracking - don't affect allocated stock
+                                batch_assignment = BatchAssignment.objects.create(
+                                    batch=batch,
+                                    salesman=invoice.salesman,
+                                    quantity=0,  # No actual allocation
+                                    delivered_quantity=0,  # No delivery - this is just for return tracking
+                                    returned_quantity=0,
+                                    pending_return_quantity=0,  # Will be updated by ProductReturn.save()
+                                    status='pending',  # Not delivered, just for return processing
+                                    delivery_date=None,
+                                    notes=f'Created for return processing from invoice {invoice.invoice_number} - no stock allocation'
+                                )
+                                logger.info(f"Created minimal batch assignment for return tracking: batch {batch_id}, salesman {invoice.salesman.id}")
+                            except Batch.DoesNotExist:
+                                return Response(
+                                    {'error': f'Batch {batch_id} not found'},
+                                    status=status.HTTP_400_BAD_REQUEST
+                                )
+                        
+                        # Create ProductReturn in pending state - this is the ONLY return record we need
+                        # The ProductReturn.save() method will automatically update pending_return_quantity
+                        from products.models import ProductReturn
+                        product_return = ProductReturn.objects.create(
+                            batch_assignment=batch_assignment,
+                            return_quantity=return_data.get('quantity'),
+                            return_reason='customer_return',  # Default reason for settlement returns
+                            return_notes=return_data.get('notes', f'Return from invoice settlement {invoice.invoice_number}'),
+                            status='pending',
+                            created_by=request.user
+                        )
+                        
+                        # DO NOT manually update pending_return_quantity here - ProductReturn.save() does it automatically
+                        
+                        # Calculate return amount for settlement (based on product price)
+                        return_amount = Decimal(str(return_data.get('quantity', 0))) * batch_assignment.batch.product.base_price
+                        total_return_amount += return_amount
+                        
+                        created_product_returns.append(product_return)
+                        
+                        # DO NOT create old-style Return record - it causes double processing
+                        # DO NOT modify batch stock here - stock will only be updated when owner approves
+                            
+                    except Exception as e:
                         return Response(
-                            {'error': 'Invalid return data', 'details': return_serializer.errors},
+                            {'error': f'Failed to create return: {str(e)}'},
                             status=status.HTTP_400_BAD_REQUEST
                         )
                 
@@ -2109,7 +2162,7 @@ class BatchReturnViewSet(viewsets.ModelViewSet):
                         settlement=settlement,
                         payment_method='return',
                         amount=total_return_amount,  # Positive amount for return credit
-                        notes=f'Returns: {len(created_returns)} items totaling {total_return_amount}'
+                        notes=f'Returns: {len(created_product_returns)} items totaling {total_return_amount}'
                     )
                 
                 # Update invoice amounts
@@ -2127,12 +2180,12 @@ class BatchReturnViewSet(viewsets.ModelViewSet):
                 return Response({
                     'success': True,
                     'settlement_id': settlement.id,
-                    'returns_created': len(created_returns),
+                    'returns_created': len(created_product_returns),
                     'total_return_amount': float(total_return_amount),
                     'total_payment_amount': float(total_payment_amount),
                     'settlement_amount': float(total_payment_amount + total_return_amount),
                     'remaining_balance': float(invoice.balance_due),
-                    'message': f'Settlement processed successfully with {len(created_returns)} returns'
+                    'message': f'Settlement processed successfully with {len(created_product_returns)} pending returns'
                 })
                 
         except Exception as e:

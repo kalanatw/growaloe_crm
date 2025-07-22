@@ -25,6 +25,7 @@ interface StockSummaryItem {
   total_stock: number;
   allocated_stock: number;
   available_stock: number;
+  pending_returns: number;
   salesmen_count: number;
 }
 
@@ -339,6 +340,9 @@ export const StockManagementPage: React.FC = () => {
                     Allocated Stock
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                    Pending Returns
+                  </th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Min Level
                   </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
@@ -375,6 +379,14 @@ export const StockManagementPage: React.FC = () => {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-500 dark:text-gray-400">
                         {stockItem.allocated_stock}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right">
+                        <span className={`text-sm font-medium ${stockItem.pending_returns > 0 
+                          ? 'text-yellow-600 dark:text-yellow-400' 
+                          : 'text-gray-500 dark:text-gray-400'
+                        }`}>
+                          {stockItem.pending_returns}
+                        </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-500 dark:text-gray-400">
                         {product?.min_stock_level || 0}

@@ -12,14 +12,14 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 import logging
 
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, DeliveryExpense
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, DeliveryExpense, ProductReturn
 from .serializers import (
     CategorySerializer, ProductSerializer, ProductCreateSerializer, SalesmanStockSerializer,
     StockMovementSerializer, ProductStockSummarySerializer,
     SalesmanStockSummarySerializer, DeliverySerializer, CreateDeliverySerializer,
     DeliveryItemSerializer, DeliverySettlementSerializer,
     BatchSerializer, BatchTransactionSerializer, BatchAssignmentSerializer, CreateBatchAssignmentSerializer,
-    DeliveryExpenseSerializer
+    DeliveryExpenseSerializer, ProductReturnSerializer, CreateProductReturnSerializer, ProcessReturnSerializer, StockOverviewSerializer
 )
 from sales.serializers import BatchRecallSerializer
 from accounts.permissions import IsOwnerOrDeveloper, IsAuthenticated
@@ -402,10 +402,16 @@ class ProductViewSet(viewsets.ModelViewSet):
                 status__in=['delivered', 'partial']
             ).aggregate(total=Sum('returned_quantity'))['total'] or 0
             
-            # Calculate available stock (total in batches - allocated + returned)
-            # This represents stock available for new deliveries
+            # Get pending returns (not yet approved/disposed) - include all assignment statuses
+            pending_returns = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['pending', 'delivered', 'partial']  # Include 'pending' for settlement returns
+            ).aggregate(total=Sum('pending_return_quantity'))['total'] or 0
+            
+            # Calculate available stock - since total_stock uses current_quantity (already reduced by allocations)
+            # we don't need to subtract allocations again (that would be double subtraction)
             net_allocated = (allocated_stock or 0) - (returned_stock or 0)
-            available_stock = total_stock  # Available for new deliveries
+            available_stock = total_stock  # current_quantity already reflects allocations
             
             # Count unique salesmen with active assignments for this product
             salesmen_count = BatchAssignment.objects.filter(
@@ -420,12 +426,118 @@ class ProductViewSet(viewsets.ModelViewSet):
                 'total_stock': total_stock,  # Total in all batches
                 'allocated_stock': net_allocated,  # Net allocated to salesmen  
                 'available_stock': available_stock,  # Available for delivery creation
+                'pending_returns': pending_returns,  # Returns awaiting approval/disposal
                 'salesmen_count': salesmen_count
             })
 
         db_logger.info(f"Stock summary generated for {len(summary_data)} products using Batch system")
         serializer = ProductStockSummarySerializer(summary_data, many=True)
         return Response(serializer.data)
+
+    @extend_schema(
+        summary="Get detailed stock overview for a product",
+        description="Get detailed stock breakdown including returns and sales data",
+        responses={
+            200: OpenApiResponse(
+                response=StockOverviewSerializer,
+                description="Detailed stock overview",
+            )
+        }
+    )
+    @action(detail=True, methods=['get'])
+    def stock_overview(self, request, pk=None):
+        """Get detailed stock overview for a specific product"""
+        try:
+            product = self.get_object()
+            today = timezone.now().date()
+            
+            # Get basic stock data
+            total_stock = Batch.objects.filter(
+                product=product,
+                is_active=True
+            ).aggregate(total=Sum('current_quantity'))['total'] or 0
+            
+            allocated_stock = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).aggregate(total=Sum('delivered_quantity'))['total'] or 0
+            
+            returned_stock = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).aggregate(total=Sum('returned_quantity'))['total'] or 0
+            
+            pending_returns = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['pending', 'delivered', 'partial']  # Include 'pending' for settlement returns
+            ).aggregate(total=Sum('pending_return_quantity'))['total'] or 0
+            
+            # Get today's return data
+            approved_returns_today = ProductReturn.objects.filter(
+                batch_assignment__batch__product=product,
+                status='approved',
+                processed_date__date=today
+            ).aggregate(total=Sum('return_quantity'))['total'] or 0
+            
+            disposed_returns_today = ProductReturn.objects.filter(
+                batch_assignment__batch__product=product,
+                status='disposed',
+                processed_date__date=today
+            ).aggregate(total=Sum('return_quantity'))['total'] or 0
+            
+            # Get today's sales (this would need to be implemented based on your sales model)
+            sales_today = 0  # Placeholder - implement based on your sales tracking
+            
+            # Calculate available stock (total - net allocated, pending returns don't affect this)
+            net_allocated = allocated_stock - returned_stock
+            available_stock = total_stock - net_allocated
+            
+            # Get salesman breakdown
+            salesman_breakdown = []
+            assignments = BatchAssignment.objects.filter(
+                batch__product=product,
+                status__in=['delivered', 'partial']
+            ).select_related('salesman', 'salesman__user').values(
+                'salesman__id', 'salesman__user__first_name', 'salesman__user__last_name'
+            ).annotate(
+                outstanding=Sum('delivered_quantity') - Sum('returned_quantity'),
+                pending_returns=Sum('pending_return_quantity')
+            )
+            
+            for assignment in assignments:
+                if assignment['outstanding'] > 0 or assignment['pending_returns'] > 0:
+                    salesman_breakdown.append({
+                        'salesman_id': assignment['salesman__id'],
+                        'salesman_name': f"{assignment['salesman__user__first_name']} {assignment['salesman__user__last_name']}",
+                        'outstanding_quantity': assignment['outstanding'],
+                        'pending_returns': assignment['pending_returns']
+                    })
+            
+            overview_data = {
+                'product_id': product.id,
+                'product_name': product.name,
+                'product_sku': product.sku,
+                'total_stock': total_stock,
+                'allocated_stock': net_allocated,
+                'available_stock': available_stock,
+                'pending_returns': pending_returns,
+                'approved_returns_today': approved_returns_today,
+                'disposed_returns_today': disposed_returns_today,
+                'sales_today': sales_today,
+                'salesmen_count': len(salesman_breakdown),
+                'low_stock_alert': available_stock <= product.min_stock_level,
+                'salesman_breakdown': salesman_breakdown
+            }
+            
+            serializer = StockOverviewSerializer(overview_data)
+            return Response(serializer.data)
+            
+        except Exception as e:
+            db_logger.error(f"Error getting stock overview for product {pk}: {str(e)}")
+            return Response(
+                {'error': 'Failed to get stock overview'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @extend_schema(
         summary="Get stock distribution by salesman",
@@ -2242,27 +2354,32 @@ class BatchAssignmentViewSet(viewsets.ModelViewSet):
             )
         
         with transaction.atomic():
-            # Update assignment
-            assignment.returned_quantity += return_quantity
-            if assignment.returned_quantity == assignment.delivered_quantity:
-                assignment.status = 'returned'
-            else:
-                assignment.status = 'partial'
+            # Create ProductReturn in pending state instead of directly adding to stock
+            product_return = ProductReturn.objects.create(
+                batch_assignment=assignment,
+                return_quantity=return_quantity,
+                return_reason='unsold',  # Default reason for salesman returns
+                return_notes=request.data.get('notes', f'Return from salesman {assignment.salesman.user.get_full_name()}'),
+                status='pending',
+                created_by=request.user
+            )
+            
+            # Update assignment pending return quantity (not returned_quantity yet)
+            assignment.pending_return_quantity += return_quantity
             assignment.save()
             
-            # Update batch quantity
-            assignment.batch.current_quantity += return_quantity
-            assignment.batch.save()
+            # DO NOT update batch quantity here - it will be updated when owner approves the return
+            # The stock will only be updated when owner approves the ProductReturn via approve_return method
             
-            # Create transaction record
+            # Create transaction record for pending return
             BatchTransaction.objects.create(
                 batch=assignment.batch,
-                transaction_type='return',
+                transaction_type='return_pending',
                 quantity=return_quantity,
-                balance_after=assignment.batch.current_quantity,
-                reference_type='batch_return',
-                reference_id=assignment.id,
-                notes=f"Return from {assignment.salesman.user.get_full_name()}",
+                balance_after=assignment.batch.current_quantity,  # No change to current quantity yet
+                reference_type='product_return',
+                reference_id=product_return.id,
+                notes=f"Pending return from {assignment.salesman.user.get_full_name()}",
                 created_by=request.user
             )
         
@@ -2867,3 +2984,413 @@ class DeliveryExpenseViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
 
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List product returns",
+        description="Get a paginated list of product returns with filtering options",
+        parameters=[
+            OpenApiParameter(
+                name='status',
+                description='Filter by return status',
+                required=False,
+                type=str,
+                enum=['pending', 'approved', 'disposed']
+            ),
+            OpenApiParameter(
+                name='return_reason',
+                description='Filter by return reason',
+                required=False,
+                type=str,
+                enum=['unsold', 'damaged', 'expired', 'defective', 'customer_return', 'other']
+            ),
+            OpenApiParameter(
+                name='salesman',
+                description='Filter by salesman ID',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='product',
+                description='Filter by product ID',
+                required=False,
+                type=int
+            ),
+            OpenApiParameter(
+                name='search',
+                description='Search by product name, salesman name, or notes',
+                required=False,
+                type=str
+            )
+        ],
+        responses={200: ProductReturnSerializer(many=True)},
+        tags=['Return Management']
+    ),
+    create=extend_schema(
+        summary="Create product return",
+        description="Create a new product return request",
+        request=CreateProductReturnSerializer,
+        responses={
+            201: ProductReturnSerializer,
+            400: OpenApiResponse(description="Invalid data provided"),
+            403: OpenApiResponse(description="Permission denied")
+        },
+        tags=['Return Management']
+    ),
+    retrieve=extend_schema(
+        summary="Get return details",
+        description="Retrieve detailed information about a specific return",
+        responses={
+            200: ProductReturnSerializer,
+            404: OpenApiResponse(description="Return not found")
+        },
+        tags=['Return Management']
+    )
+)
+class ProductReturnViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing product returns with approval workflow
+    """
+    queryset = ProductReturn.objects.select_related(
+        'batch_assignment__batch__product',
+        'batch_assignment__salesman__user',
+        'batch_assignment__delivery',
+        'processed_by',
+        'created_by'
+    ).all()
+    serializer_class = ProductReturnSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['status', 'return_reason', 'batch_assignment__salesman', 'batch_assignment__batch__product']
+    search_fields = ['batch_assignment__batch__product__name', 'batch_assignment__salesman__user__first_name', 
+                    'batch_assignment__salesman__user__last_name', 'return_notes', 'processing_notes']
+    ordering_fields = ['return_date', 'processed_date', 'return_quantity']
+    ordering = ['-return_date']
+
+    def get_serializer_class(self):
+        """Return different serializers based on action"""
+        if self.action == 'create':
+            return CreateProductReturnSerializer
+        elif self.action in ['approve_return', 'dispose_return']:
+            return ProcessReturnSerializer
+        return ProductReturnSerializer
+
+    def get_queryset(self):
+        """Filter returns based on user role"""
+        queryset = super().get_queryset()
+        
+        if self.request.user.role == 'owner':
+            try:
+                owner = self.request.user.owner_profile
+                queryset = queryset.filter(batch_assignment__batch__product__owner=owner)
+            except:
+                queryset = queryset.none()
+        elif self.request.user.role == 'salesman':
+            try:
+                salesman = self.request.user.salesman_profile
+                # Salesmen can only see their own returns
+                queryset = queryset.filter(batch_assignment__salesman=salesman)
+            except:
+                queryset = queryset.none()
+        elif self.request.user.role == 'shop':
+            # Shops cannot access returns directly
+            queryset = queryset.none()
+        # Developers can see all returns
+        
+        return queryset
+
+    def get_permissions(self):
+        """Different permissions for different actions"""
+        if self.action in ['approve_return', 'dispose_return']:
+            permission_classes = [IsOwnerOrDeveloper]
+        else:
+            permission_classes = [IsAuthenticated]
+        
+        return [permission() for permission in permission_classes]
+
+    def perform_create(self, serializer):
+        """Handle return creation with logging"""
+        db_logger.info(f"Creating product return by user: {self.request.user.username}")
+        
+        return_obj = serializer.save(created_by=self.request.user)
+        
+        db_logger.info(f"Product return created: ID={return_obj.id}, Product={return_obj.product.name}, "
+                      f"Quantity={return_obj.return_quantity}, Reason={return_obj.return_reason}")
+
+    @extend_schema(
+        summary="Approve product return",
+        description="Approve a pending return and add stock back to inventory",
+        request=ProcessReturnSerializer,
+        responses={
+            200: OpenApiResponse(description="Return approved successfully"),
+            400: OpenApiResponse(description="Invalid request or return cannot be approved"),
+            403: OpenApiResponse(description="Permission denied"),
+            404: OpenApiResponse(description="Return not found")
+        },
+        tags=['Return Management']
+    )
+    @action(detail=True, methods=['post'])
+    def approve_return(self, request, pk=None):
+        """Approve a pending return"""
+        try:
+            return_obj = self.get_object()
+            
+            if return_obj.status != 'pending':
+                return Response(
+                    {'error': 'Only pending returns can be approved'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            serializer = ProcessReturnSerializer(data=request.data)
+            if serializer.is_valid():
+                processing_notes = serializer.validated_data.get('processing_notes', '')
+                
+                # Approve the return
+                return_obj.approve_return(
+                    processed_by=request.user,
+                    processing_notes=processing_notes
+                )
+                
+                db_logger.info(f"Return approved: ID={return_obj.id}, Product={return_obj.product.name}, "
+                              f"Quantity={return_obj.return_quantity}, Processed by={request.user.username}")
+                
+                return Response({
+                    'message': 'Return approved successfully',
+                    'return_id': return_obj.id,
+                    'status': return_obj.status,
+                    'processed_date': return_obj.processed_date
+                })
+            else:
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            db_logger.error(f"Error approving return {pk}: {str(e)}")
+            return Response(
+                {'error': 'Failed to approve return'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Dispose product return",
+        description="Dispose a pending return (permanently remove from system)",
+        request=ProcessReturnSerializer,
+        responses={
+            200: OpenApiResponse(description="Return disposed successfully"),
+            400: OpenApiResponse(description="Invalid request or return cannot be disposed"),
+            403: OpenApiResponse(description="Permission denied"),
+            404: OpenApiResponse(description="Return not found")
+        },
+        tags=['Return Management']
+    )
+    @action(detail=True, methods=['post'])
+    def dispose_return(self, request, pk=None):
+        """Dispose a pending return"""
+        try:
+            return_obj = self.get_object()
+            
+            if return_obj.status != 'pending':
+                return Response(
+                    {'error': 'Only pending returns can be disposed'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            serializer = ProcessReturnSerializer(data=request.data)
+            if serializer.is_valid():
+                processing_notes = serializer.validated_data.get('processing_notes', '')
+                
+                # Dispose the return
+                return_obj.dispose_return(
+                    processed_by=request.user,
+                    processing_notes=processing_notes
+                )
+                
+                db_logger.info(f"Return disposed: ID={return_obj.id}, Product={return_obj.product.name}, "
+                              f"Quantity={return_obj.return_quantity}, Processed by={request.user.username}")
+                
+                return Response({
+                    'message': 'Return disposed successfully',
+                    'return_id': return_obj.id,
+                    'status': return_obj.status,
+                    'processed_date': return_obj.processed_date
+                })
+            else:
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            db_logger.error(f"Error disposing return {pk}: {str(e)}")
+            return Response(
+                {'error': 'Failed to dispose return'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Get pending returns summary",
+        description="Get summary of all pending returns for dashboard",
+        responses={
+            200: OpenApiResponse(
+                description="Pending returns summary",
+                examples=[
+                    OpenApiExample(
+                        "Pending Returns Summary",
+                        value={
+                            "total_pending": 15,
+                            "total_quantity": 150,
+                            "by_reason": {
+                                "unsold": 10,
+                                "damaged": 3,
+                                "expired": 2
+                            },
+                            "by_salesman": [
+                                {
+                                    "salesman_id": 1,
+                                    "salesman_name": "John Doe",
+                                    "pending_count": 5,
+                                    "pending_quantity": 50
+                                }
+                            ]
+                        }
+                    )
+                ]
+            )
+        },
+        tags=['Return Management']
+    )
+    @action(detail=False, methods=['get'])
+    def pending_summary(self, request):
+        """Get summary of pending returns"""
+        try:
+            # Filter by user permissions
+            queryset = self.get_queryset().filter(status='pending')
+            
+            # Total counts
+            total_pending = queryset.count()
+            total_quantity = queryset.aggregate(total=Sum('return_quantity'))['total'] or 0
+            
+            # Group by reason
+            by_reason = {}
+            reason_counts = queryset.values('return_reason').annotate(
+                count=Count('id'),
+                quantity=Sum('return_quantity')
+            )
+            for item in reason_counts:
+                by_reason[item['return_reason']] = {
+                    'count': item['count'],
+                    'quantity': item['quantity']
+                }
+            
+            # Group by salesman
+            by_salesman = []
+            salesman_counts = queryset.values(
+                'batch_assignment__salesman__id',
+                'batch_assignment__salesman__user__first_name',
+                'batch_assignment__salesman__user__last_name'
+            ).annotate(
+                count=Count('id'),
+                quantity=Sum('return_quantity')
+            )
+            
+            for item in salesman_counts:
+                by_salesman.append({
+                    'salesman_id': item['batch_assignment__salesman__id'],
+                    'salesman_name': f"{item['batch_assignment__salesman__user__first_name']} {item['batch_assignment__salesman__user__last_name']}",
+                    'pending_count': item['count'],
+                    'pending_quantity': item['quantity']
+                })
+            
+            return Response({
+                'total_pending': total_pending,
+                'total_quantity': total_quantity,
+                'by_reason': by_reason,
+                'by_salesman': by_salesman
+            })
+            
+        except Exception as e:
+            db_logger.error(f"Error getting pending returns summary: {str(e)}")
+            return Response(
+                {'error': 'Failed to get pending returns summary'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Bulk process returns",
+        description="Approve or dispose multiple returns at once",
+        request=OpenApiExample(
+            "Bulk Process Request",
+            value={
+                "return_ids": [1, 2, 3],
+                "action": "approve",
+                "processing_notes": "Bulk approval of unsold stock"
+            }
+        ),
+        responses={
+            200: OpenApiResponse(description="Returns processed successfully"),
+            400: OpenApiResponse(description="Invalid request data"),
+            403: OpenApiResponse(description="Permission denied")
+        },
+        tags=['Return Management']
+    )
+    @action(detail=False, methods=['post'])
+    def bulk_process(self, request):
+        """Bulk approve or dispose returns"""
+        try:
+            return_ids = request.data.get('return_ids', [])
+            action = request.data.get('action')
+            processing_notes = request.data.get('processing_notes', '')
+            
+            if not return_ids or action not in ['approve', 'dispose']:
+                return Response(
+                    {'error': 'Invalid request. Provide return_ids and action (approve/dispose)'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get returns that can be processed
+            returns = self.get_queryset().filter(
+                id__in=return_ids,
+                status='pending'
+            )
+            
+            if not returns.exists():
+                return Response(
+                    {'error': 'No pending returns found with provided IDs'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            processed_count = 0
+            errors = []
+            
+            for return_obj in returns:
+                try:
+                    if action == 'approve':
+                        return_obj.approve_return(
+                            processed_by=request.user,
+                            processing_notes=processing_notes
+                        )
+                    else:  # dispose
+                        return_obj.dispose_return(
+                            processed_by=request.user,
+                            processing_notes=processing_notes
+                        )
+                    processed_count += 1
+                except Exception as e:
+                    errors.append(f"Return {return_obj.id}: {str(e)}")
+            
+            db_logger.info(f"Bulk {action} processed {processed_count} returns by {request.user.username}")
+            
+            response_data = {
+                'message': f'Successfully {action}d {processed_count} returns',
+                'processed_count': processed_count,
+                'total_requested': len(return_ids)
+            }
+            
+            if errors:
+                response_data['errors'] = errors
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            db_logger.error(f"Error in bulk process returns: {str(e)}")
+            return Response(
+                {'error': 'Failed to process returns'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

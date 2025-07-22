@@ -22,7 +22,7 @@ import { SalesmenPage } from './pages/SalesmenPage';
 import { CreateSalesmanPage } from './pages/CreateSalesmanPage';
 import { InvoiceSettlementPage } from './pages/InvoiceSettlementPage';
 import { DeliveriesPage } from './pages/DeliveriesPage';
-import { ReturnsPage } from './pages/ReturnsPage';
+import { ReturnsManagementPage } from './pages/ReturnsManagementPage';
 import { CommissionPage } from './pages/CommissionPage';
 import { USER_ROLES } from './config/constants';
 
@@ -181,7 +181,7 @@ function App() {
                   path="/returns"
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
-                      <ReturnsPage />
+                      <ReturnsManagementPage />
                     </ProtectedRoute>
                   }
                 />

@@ -737,6 +737,8 @@ class Batch(models.Model):
             total_returned=models.Sum('returned_quantity')
         )
         
+        # Calculate actual allocated stock: delivered - returned
+        # Pending returns should NOT affect available stock calculation
         total_allocated = (allocated['total_delivered'] or 0) - (allocated['total_returned'] or 0)
         return max(0, self.current_quantity - total_allocated)
     
@@ -864,6 +866,7 @@ class BatchAssignment(models.Model):
     quantity = models.PositiveIntegerField(help_text="Quantity assigned")
     delivered_quantity = models.PositiveIntegerField(default=0, help_text="Quantity actually delivered")
     returned_quantity = models.PositiveIntegerField(default=0, help_text="Quantity returned")
+    pending_return_quantity = models.PositiveIntegerField(default=0, help_text="Quantity in pending return state")
     status = models.CharField(max_length=20, choices=ASSIGNMENT_STATUS, default='pending')
     delivery_date = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True, null=True)
@@ -890,6 +893,137 @@ class BatchAssignment(models.Model):
         """Get quantity sold (delivered - returned = sold + still with salesman)"""
         # For now, we track outstanding. Sold quantity would come from invoice items
         return 0  # This would be calculated from invoice items if needed
+
+
+class ProductReturn(models.Model):
+    """Track product returns with approval workflow"""
+    RETURN_STATUS = (
+        ('pending', 'Pending Approval'),
+        ('approved', 'Approved - Added to Stock'),
+        ('disposed', 'Disposed - Removed from System'),
+    )
+    
+    RETURN_REASON = (
+        ('unsold', 'Unsold Stock'),
+        ('damaged', 'Damaged Product'),
+        ('expired', 'Expired Product'),
+        ('defective', 'Defective Product'),
+        ('customer_return', 'Customer Return'),
+        ('other', 'Other Reason'),
+    )
+    
+    batch_assignment = models.ForeignKey(BatchAssignment, on_delete=models.CASCADE, related_name='returns')
+    return_quantity = models.PositiveIntegerField(help_text="Quantity being returned")
+    return_reason = models.CharField(max_length=20, choices=RETURN_REASON, default='unsold')
+    return_notes = models.TextField(blank=True, null=True, help_text="Additional notes about the return")
+    status = models.CharField(max_length=20, choices=RETURN_STATUS, default='pending')
+    
+    # Return tracking
+    return_date = models.DateTimeField(auto_now_add=True, help_text="When return was initiated")
+    processed_date = models.DateTimeField(null=True, blank=True, help_text="When return was processed")
+    processed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='processed_returns')
+    processing_notes = models.TextField(blank=True, null=True, help_text="Admin notes during processing")
+    
+    # Audit fields
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_returns')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'product_returns'
+        ordering = ['-created_at']
+        
+    def __str__(self):
+        return f"Return: {self.batch_assignment.batch.product.name} - {self.return_quantity} units ({self.status})"
+    
+    @property
+    def product(self):
+        """Get the product being returned"""
+        return self.batch_assignment.batch.product
+    
+    @property
+    def salesman(self):
+        """Get the salesman returning the product"""
+        return self.batch_assignment.salesman
+    
+    @property
+    def batch(self):
+        """Get the batch being returned"""
+        return self.batch_assignment.batch
+    
+    def approve_return(self, processed_by, processing_notes=""):
+        """Approve the return and add back to available stock"""
+        if self.status != 'pending':
+            raise ValueError("Only pending returns can be approved")
+        
+        # Only update pending return quantity - don't modify assignment.returned_quantity
+        # This prevents double counting in allocated stock calculations
+        self.batch_assignment.pending_return_quantity -= self.return_quantity
+        self.batch_assignment.save()
+        
+        # Add back to batch stock (approved returns go back to available stock)
+        self.batch_assignment.batch.current_quantity += self.return_quantity
+        self.batch_assignment.batch.save()
+        
+        # Create batch transaction
+        BatchTransaction.objects.create(
+            batch=self.batch_assignment.batch,
+            transaction_type='return_approved',
+            quantity=self.return_quantity,
+            balance_after=self.batch_assignment.batch.current_quantity,
+            reference_type='product_return',
+            reference_id=self.id,
+            notes=f"Return approved: {self.return_quantity} units from {self.salesman.user.get_full_name()}",
+            created_by=processed_by
+        )
+        
+        # Update return status
+        self.status = 'approved'
+        self.processed_date = timezone.now()
+        self.processed_by = processed_by
+        self.processing_notes = processing_notes
+        self.save()
+        
+        return True
+    
+    def dispose_return(self, processed_by, processing_notes=""):
+        """Dispose the return (remove from system permanently)"""
+        if self.status != 'pending':
+            raise ValueError("Only pending returns can be disposed")
+        
+        # Update batch assignment (remove from pending, don't add to returned)
+        self.batch_assignment.pending_return_quantity -= self.return_quantity
+        self.batch_assignment.save()
+        
+        # Create batch transaction for disposal (no stock addition)
+        BatchTransaction.objects.create(
+            batch=self.batch_assignment.batch,
+            transaction_type='disposal',
+            quantity=-self.return_quantity,  # Negative to show removal
+            balance_after=self.batch_assignment.batch.current_quantity,  # No change to batch stock
+            reference_type='product_return',
+            reference_id=self.id,
+            notes=f"Return disposed: {self.return_quantity} units from {self.salesman.user.get_full_name()} - {processing_notes}",
+            created_by=processed_by
+        )
+        
+        # Update return status
+        self.status = 'disposed'
+        self.processed_date = timezone.now()
+        self.processed_by = processed_by
+        self.processing_notes = processing_notes
+        self.save()
+        
+        return True
+    
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        
+        # When a new return is created, update batch assignment pending return quantity
+        if is_new:
+            self.batch_assignment.pending_return_quantity += self.return_quantity
+            self.batch_assignment.save()
 
 
 class BatchDefect(models.Model):
@@ -1068,5 +1202,3 @@ class DeliveryExpense(models.Model):
 
     def __str__(self):
         return f"{self.delivery} - {self.category}: {self.amount}"
-
-# NOTE: You must create and apply a migration after this change.

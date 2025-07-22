@@ -4,7 +4,7 @@ from django.db.models import Sum
 from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
-from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem, DeliveryExpense
+from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem, DeliveryExpense, ProductReturn
 from accounts.models import Salesman
 
 User = get_user_model()
@@ -168,6 +168,7 @@ class ProductStockSummarySerializer(serializers.Serializer):
     total_stock = serializers.IntegerField()
     allocated_stock = serializers.IntegerField()
     available_stock = serializers.IntegerField()
+    pending_returns = serializers.IntegerField()
     salesmen_count = serializers.IntegerField()
 
 
@@ -620,3 +621,102 @@ class CreateBatchAssignmentSerializer(serializers.ModelSerializer):
         )
         
         return assignment
+
+
+class ProductReturnSerializer(serializers.ModelSerializer):
+    """Serializer for product returns"""
+    product_name = serializers.CharField(source='batch_assignment.batch.product.name', read_only=True)
+    product_sku = serializers.CharField(source='batch_assignment.batch.product.sku', read_only=True)
+    batch_number = serializers.CharField(source='batch_assignment.batch.batch_number', read_only=True)
+    salesman_name = serializers.CharField(source='batch_assignment.salesman.user.get_full_name', read_only=True)
+    delivery_number = serializers.CharField(source='batch_assignment.delivery.delivery_number', read_only=True)
+    processed_by_name = serializers.CharField(source='processed_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    
+    class Meta:
+        model = ProductReturn
+        fields = [
+            'id', 'batch_assignment', 'return_quantity', 'return_reason', 'return_notes',
+            'status', 'return_date', 'processed_date', 'processed_by', 'processed_by_name',
+            'processing_notes', 'created_by', 'created_by_name', 'created_at', 'updated_at',
+            'product_name', 'product_sku', 'batch_number', 'salesman_name', 'delivery_number'
+        ]
+        read_only_fields = [
+            'id', 'return_date', 'processed_date', 'processed_by', 'processed_by_name',
+            'created_at', 'updated_at', 'product_name', 'product_sku', 'batch_number',
+            'salesman_name', 'delivery_number', 'created_by_name'
+        ]
+    
+    def validate_return_quantity(self, value):
+        """Validate return quantity doesn't exceed outstanding quantity"""
+        if hasattr(self, 'initial_data') and 'batch_assignment' in self.initial_data:
+            try:
+                batch_assignment = BatchAssignment.objects.get(id=self.initial_data['batch_assignment'])
+                outstanding = batch_assignment.outstanding_quantity
+                if value > outstanding:
+                    raise serializers.ValidationError(
+                        f"Return quantity ({value}) cannot exceed outstanding quantity ({outstanding})"
+                    )
+            except BatchAssignment.DoesNotExist:
+                raise serializers.ValidationError("Invalid batch assignment")
+        return value
+
+
+class CreateProductReturnSerializer(serializers.ModelSerializer):
+    """Serializer for creating product returns"""
+    
+    class Meta:
+        model = ProductReturn
+        fields = ['batch_assignment', 'return_quantity', 'return_reason', 'return_notes']
+    
+    def validate(self, data):
+        batch_assignment = data['batch_assignment']
+        return_quantity = data['return_quantity']
+        
+        # Check if batch assignment has enough outstanding quantity
+        outstanding = batch_assignment.outstanding_quantity
+        if return_quantity > outstanding:
+            raise serializers.ValidationError(
+                f"Return quantity ({return_quantity}) cannot exceed outstanding quantity ({outstanding})"
+            )
+        
+        # Check if batch assignment belongs to the requesting user (if salesman)
+        request = self.context.get('request')
+        if request and request.user.role == 'salesman':
+            if batch_assignment.salesman.user != request.user:
+                raise serializers.ValidationError("You can only return your own stock")
+        
+        return data
+
+
+class ProcessReturnSerializer(serializers.Serializer):
+    """Serializer for processing returns (approve/dispose)"""
+    action = serializers.ChoiceField(choices=['approve', 'dispose'])
+    processing_notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate_action(self, value):
+        if value not in ['approve', 'dispose']:
+            raise serializers.ValidationError("Action must be either 'approve' or 'dispose'")
+        return value
+
+
+class StockOverviewSerializer(serializers.Serializer):
+    """Serializer for detailed stock overview including returns"""
+    product_id = serializers.IntegerField()
+    product_name = serializers.CharField()
+    product_sku = serializers.CharField()
+    total_stock = serializers.IntegerField()
+    allocated_stock = serializers.IntegerField()
+    available_stock = serializers.IntegerField()
+    pending_returns = serializers.IntegerField()
+    approved_returns_today = serializers.IntegerField()
+    disposed_returns_today = serializers.IntegerField()
+    sales_today = serializers.IntegerField()
+    salesmen_count = serializers.IntegerField()
+    low_stock_alert = serializers.BooleanField()
+    
+    # Breakdown by salesman
+    salesman_breakdown = serializers.ListField(
+        child=serializers.DictField(), 
+        required=False
+    )
