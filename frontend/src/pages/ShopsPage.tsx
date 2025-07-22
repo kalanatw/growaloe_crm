@@ -78,10 +78,10 @@ export const ShopsPage: React.FC = () => {
       <div className="space-y-6">
         {/* Header with Add Shop Button */}
         <div className="flex justify-between items-center">
-          <div>
+          {/* <div>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Shops Management</h2>
             <p className="text-gray-600 dark:text-gray-400 mt-1">Manage your shop network and monitor performance</p>
-          </div>
+          </div> */}
           <button 
             onClick={() => navigate('/shops/create')}
             className="btn-primary inline-flex items-center px-4 py-2"

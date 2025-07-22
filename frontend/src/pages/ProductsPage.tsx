@@ -321,9 +321,9 @@ export const ProductsPage: React.FC = () => {
           <div className="flex items-center space-x-3">
             <Package className="h-8 w-8 text-primary-600" />
             <div>
-              <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+              {/* <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
                 Products & Stock Management
-              </h1>
+              </h1> */}
               <p className="text-gray-600 dark:text-gray-400">
                 {isOwner ? 'Manage your product catalog and inventory' : 'View your allocated product inventory'}
               </p>

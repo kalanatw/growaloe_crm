@@ -253,7 +253,31 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # All roles can view products
+        
+        # Filter products by owner for owner role
+        if self.request.user.role == 'owner':
+            try:
+                owner = self.request.user.owner_profile
+                queryset = queryset.filter(owner=owner)
+            except:
+                # If owner profile doesn't exist, return empty queryset
+                queryset = queryset.none()
+        elif self.request.user.role == 'salesman':
+            try:
+                # Salesmen can only see products from their owner
+                salesman = self.request.user.salesman_profile
+                queryset = queryset.filter(owner=salesman.owner)
+            except:
+                queryset = queryset.none()
+        elif self.request.user.role == 'shop':
+            try:
+                # Shops can only see products from their salesman's owner
+                shop = self.request.user.shop_profile
+                queryset = queryset.filter(owner=shop.salesman.owner)
+            except:
+                queryset = queryset.none()
+        # Developers can see all products (no filtering)
+        
         return queryset
 
     def get_permissions(self):
@@ -269,15 +293,25 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """
-        Handle product creation with enhanced logging
+        Handle product creation with enhanced logging and owner assignment
         """
         db_logger.info(f"Creating new product by user: {self.request.user.username}")
         db_logger.info(f"Product data: {serializer.validated_data}")
         
-        product = serializer.save(created_by=self.request.user)
+        # Get the owner for the current user
+        owner = None
+        if self.request.user.role == 'owner':
+            try:
+                owner = self.request.user.owner_profile
+            except:
+                raise serializers.ValidationError("Owner profile not found for user")
+        else:
+            raise serializers.ValidationError("Only owners can create products")
+        
+        product = serializer.save(created_by=self.request.user, owner=owner)
         
         db_logger.info(f"Product created successfully: ID={product.id}, SKU={product.sku}, Name={product.name}")
-        db_logger.info(f"Category: {product.category.name if product.category else 'None'}")
+        db_logger.info(f"Owner: {owner.business_name}, Category: {product.category.name if product.category else 'None'}")
         
         # No initial stock creation - stock will be managed via batch system
 
@@ -345,7 +379,8 @@ class ProductViewSet(viewsets.ModelViewSet):
         """
         db_logger.info(f"Stock summary requested by user: {request.user.username}")
         
-        products = Product.objects.filter(is_active=True)
+        # Use the same filtering logic as get_queryset
+        products = self.get_queryset().filter(is_active=True)
 
         summary_data = []
         for product in products:
@@ -516,7 +551,8 @@ class ProductViewSet(viewsets.ModelViewSet):
         from decimal import Decimal
         from django.db.models import DecimalField
         
-        products_with_stock = Product.objects.filter(
+        # Use the same filtering logic as get_queryset to filter by owner
+        products_with_stock = self.get_queryset().filter(
             is_active=True,
             batches__current_quantity__gt=0,
             batches__is_active=True
