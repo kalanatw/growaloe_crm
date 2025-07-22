@@ -31,6 +31,7 @@ class Invoice(models.Model):
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00, help_text="Additional discount percentage added to shop margin")
     shop_margin = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)  # Percentage
     net_total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)

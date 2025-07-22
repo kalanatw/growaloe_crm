@@ -448,7 +448,183 @@ class ShopViewSet(viewsets.ModelViewSet):
         shop = self.get_object()
         # This would include transaction history
         # Implementation depends on Transaction model
-        return Response({'message': 'Balance history endpoint'})
+        return Response({'message': 'Balance history endpoint - implementation pending'})
+    
+    @action(detail=False, methods=['post'])
+    def optimize_route(self, request):
+        """Calculate optimized route for visiting multiple shops"""
+        shop_ids = request.data.get('shop_ids', [])
+        start_location = request.data.get('start_location')  # {lat, lng}
+        
+        if not shop_ids:
+            return Response({'error': 'shop_ids is required'}, status=400)
+        
+        if not start_location or 'lat' not in start_location or 'lng' not in start_location:
+            return Response({'error': 'start_location with lat and lng is required'}, status=400)
+        
+        # Get shops with location data
+        queryset = self.get_queryset()
+        shops = queryset.filter(
+            id__in=shop_ids,
+            latitude__isnull=False,
+            longitude__isnull=False
+        )
+        
+        if not shops.exists():
+            return Response({'error': 'No shops found with location data'}, status=400)
+        
+        # Prepare shop data for route optimization
+        shop_locations = []
+        for shop in shops:
+            shop_locations.append({
+                'id': shop.id,
+                'name': shop.name,
+                'lat': float(shop.latitude),
+                'lng': float(shop.longitude),
+                'address': shop.address
+            })
+        
+        # For now, return the shops in order (basic implementation)
+        # In a production environment, you might want to integrate with
+        # Google Maps Directions API or implement a TSP algorithm
+        response_data = {
+            'start_location': start_location,
+            'shops': shop_locations,
+            'total_shops': len(shop_locations),
+            'message': 'Route optimization data prepared. Use Google Maps API on frontend for actual route calculation.'
+        }
+        
+        return Response(response_data)
+    
+    @action(detail=False, methods=['post'])
+    def search_places(self, request):
+        """Search for places using Google Places API"""
+        import requests
+        from django.conf import settings
+        
+        query = request.data.get('query', '')
+        location = request.data.get('location')  # {lat, lng}
+        search_type = request.data.get('type', 'establishment')  # restaurant, store, etc.
+        
+        if not query and not location:
+            return Response({'error': 'Query or location is required'}, status=400)
+        
+        # Get Google Maps API key from environment
+        api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', None)
+        if not api_key:
+            # Fallback to hardcoded key for now
+            api_key = 'AIzaSyAFxiUSF7bacQEx9TGQJqPvxw6G92M61ZE'
+        
+        try:
+            if query:
+                # Text search
+                url = f"https://maps.googleapis.com/maps/api/place/textsearch/json"
+                params = {
+                    'query': query,
+                    'key': api_key
+                }
+            else:
+                # Nearby search
+                url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+                params = {
+                    'location': f"{location['lat']},{location['lng']}",
+                    'radius': 2000,
+                    'type': search_type,
+                    'key': api_key
+                }
+            
+            response = requests.get(url, params=params)
+            data = response.json()
+            
+            if data.get('status') == 'OK':
+                # Format results for frontend
+                places = []
+                for place in data.get('results', []):
+                    places.append({
+                        'place_id': place.get('place_id'),
+                        'name': place.get('name'),
+                        'formatted_address': place.get('formatted_address'),
+                        'types': place.get('types', []),
+                        'rating': place.get('rating'),
+                        'location': {
+                            'lat': place.get('geometry', {}).get('location', {}).get('lat'),
+                            'lng': place.get('geometry', {}).get('location', {}).get('lng')
+                        },
+                        'business_status': place.get('business_status'),
+                        'price_level': place.get('price_level')
+                    })
+                
+                return Response({
+                    'status': 'success',
+                    'places': places,
+                    'total': len(places)
+                })
+            else:
+                return Response({
+                    'error': f"Google Places API error: {data.get('status')}",
+                    'details': data.get('error_message', '')
+                }, status=400)
+                
+        except Exception as e:
+            return Response({
+                'error': f"Failed to search places: {str(e)}"
+            }, status=500)
+    
+    @action(detail=False, methods=['post'])
+    def geocode_address(self, request):
+        """Geocode an address using Google Geocoding API"""
+        import requests
+        from django.conf import settings
+        
+        address = request.data.get('address', '')
+        
+        if not address:
+            return Response({'error': 'Address is required'}, status=400)
+        
+        # Get Google Maps API key from environment
+        api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', None)
+        if not api_key:
+            # Fallback to hardcoded key for now
+            api_key = 'AIzaSyAFxiUSF7bacQEx9TGQJqPvxw6G92M61ZE'
+        
+        try:
+            url = f"https://maps.googleapis.com/maps/api/geocode/json"
+            params = {
+                'address': address,
+                'key': api_key
+            }
+            
+            response = requests.get(url, params=params)
+            data = response.json()
+            
+            if data.get('status') == 'OK':
+                results = []
+                for result in data.get('results', []):
+                    results.append({
+                        'formatted_address': result.get('formatted_address'),
+                        'location': {
+                            'lat': result.get('geometry', {}).get('location', {}).get('lat'),
+                            'lng': result.get('geometry', {}).get('location', {}).get('lng')
+                        },
+                        'place_id': result.get('place_id'),
+                        'types': result.get('types', [])
+                    })
+                
+                return Response({
+                    'status': 'success',
+                    'results': results,
+                    'total': len(results)
+                })
+            else:
+                return Response({
+                    'error': f"Geocoding API error: {data.get('status')}",
+                    'details': data.get('error_message', '')
+                }, status=400)
+                
+        except Exception as e:
+            return Response({
+                'error': f"Failed to geocode address: {str(e)}"
+            }, status=500)
 
 
 class MarginPolicyViewSet(viewsets.ModelViewSet):

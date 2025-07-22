@@ -8,10 +8,11 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProductsPage } from './pages/ProductsPage';
-import { NewCreateInvoicePage } from './pages/NewCreateInvoicePage';
+import { CreateInvoicePage } from './pages/CreateInvoicePage';
 import { InvoicesPage } from './pages/InvoicesPage';
 import { ShopsPage } from './pages/ShopsPage';
 import { CreateShopPage } from './pages/CreateShopPage';
+import { EditShopPage } from './pages/EditShopPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
 import { InvoiceDetailPage } from './pages/InvoiceDetailPage';
 import { ShopDetailPage } from './pages/ShopDetailPage';
@@ -39,7 +40,12 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <AuthProvider>
-          <Router>
+          <Router
+            future={{
+              v7_startTransition: true,
+              v7_relativeSplatPath: true,
+            }}
+          >
             <div className="App">
               <Routes>
                 <Route path="/login" element={<LoginPage />} />
@@ -63,7 +69,7 @@ function App() {
                   path="/invoices/create"
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
-                      <NewCreateInvoicePage />
+                      <CreateInvoicePage />
                     </ProtectedRoute>
                   }
                 />
@@ -88,6 +94,14 @@ function App() {
                   element={
                     <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
                       <CreateShopPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/shops/:id/edit"
+                  element={
+                    <ProtectedRoute allowedRoles={[USER_ROLES.OWNER, USER_ROLES.SALESMAN]}>
+                      <EditShopPage />
                     </ProtectedRoute>
                   }
                 />

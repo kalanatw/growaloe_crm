@@ -33,7 +33,7 @@ const navigation = [
   { name: 'Analytics', href: '/analytics', icon: BarChart3 },
 ];
 
-// Role-specific navigation items - now unified since NewCreateInvoicePage handles both
+// Role-specific navigation items - now unified with enhanced CreateInvoicePage
 const getCreateInvoiceItem = (userRole: string | undefined) => {
   return { name: 'Create Invoice', href: '/invoices/create', icon: FileText };
 };
@@ -90,7 +90,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 px-4 py-6 space-y-2">
+          <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
             {navigation
               .filter(item => {
                 // Hide 'Products & Stock' for salesmen

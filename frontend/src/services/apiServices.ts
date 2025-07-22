@@ -14,9 +14,6 @@ import {
   CreateSalesmanData,
   CreateProductData,
   SalesAnalytics,
-  MonthlyTrend,
-  TopProduct,
-  AnalyticsData,
   CompanySettings,
   AvailableBatch,
   CreateBatchInvoiceData,
@@ -319,6 +316,7 @@ export const salesmanService = {
     return apiClient.get<{ results: Salesman[] }>('/auth/salesmen/');
   },
 
+  
   getSalesman: async (id: number): Promise<Salesman> => {
     return apiClient.get<Salesman>(`/auth/salesmen/${id}/`);
   },

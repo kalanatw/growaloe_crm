@@ -171,7 +171,7 @@ class ShopSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'salesman', 'salesman_id', 'user', 'user_id', 'name',
             'address', 'contact_person', 'phone', 'email', 'shop_margin',
-            'credit_limit', 'current_balance', 'is_active',
+            'credit_limit', 'current_balance', 'latitude', 'longitude', 'is_active',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']

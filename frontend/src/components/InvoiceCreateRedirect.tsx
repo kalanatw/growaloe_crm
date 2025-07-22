@@ -1,7 +1,7 @@
 import React from 'react';
-import { NewCreateInvoicePage } from '../pages/NewCreateInvoicePage';
+import { CreateInvoicePage } from '../pages/CreateInvoicePage';
 
 export const InvoiceCreateRedirect: React.FC = () => {
-  // Since the route is now owner-only, we can directly show NewCreateInvoicePage
-  return <NewCreateInvoicePage />;
+  // Unified invoice creation page with enhanced features
+  return <CreateInvoicePage />;
 };

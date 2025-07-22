@@ -178,8 +178,8 @@ export const DeliveriesPage: React.FC = () => {
           />
         )}
         {historyModalSalesman && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto flex flex-col justify-start lg:items-center lg:justify-center z-50">
+            <div className="bg-white rounded-lg p-2 sm:p-4 md:p-6 w-full h-auto lg:max-h-[90vh] lg:overflow-y-auto max-w-4xl">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-semibold">History - {historyModalSalesman.salesman_name || historyModalSalesman.name}</h3>
                 <button className="btn btn-outline btn-sm" onClick={handleCloseHistoryModal}>Close</button>
@@ -204,7 +204,7 @@ export const DeliveriesPage: React.FC = () => {
                 historyDeliveries.length === 0 ? (
                   <div className="text-center py-8 text-gray-500">No deliveries found.</div>
                 ) : (
-                  <table className="min-w-full divide-y divide-gray-200 mb-6">
+                  <table className="min-w-full divide-y divide-gray-200 mb-6 overflow-x-auto">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Delivery #</th>
@@ -274,7 +274,7 @@ export const DeliveriesPage: React.FC = () => {
                 historySettlements.length === 0 ? (
                   <div className="text-center py-8 text-gray-500">No settlements found.</div>
                 ) : (
-                  <table className="min-w-full divide-y divide-gray-200 mb-6">
+                  <table className="min-w-full divide-y divide-gray-200 mb-6 overflow-x-auto">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Settlement #</th>
@@ -853,8 +853,8 @@ const SalesmanDetailsModal: React.FC<SalesmanDetailsModalProps> = function Sales
   const netCash = deliveryTotal - totalExpenses;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto flex flex-col justify-start lg:items-center lg:justify-center z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full h-auto lg:max-h-[90vh] lg:overflow-y-auto">
         <div className="p-6 border-b border-gray-200">
           <div className="flex justify-between items-center">
             <div>
@@ -1024,8 +1024,8 @@ const SalesmanDetailsModal: React.FC<SalesmanDetailsModalProps> = function Sales
 
         {/* Expense Modal */}
         {isExpenseModalOpen && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg p-6 w-full max-w-md">
+          <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto flex flex-col justify-start lg:items-center lg:justify-center z-50">
+            <div className="bg-white rounded-lg p-2 sm:p-4 md:p-6 w-full h-auto lg:max-h-[90vh] lg:overflow-y-auto max-w-md">
               <h3 className="text-lg font-semibold mb-4">{editingExpense ? 'Edit Expense' : 'Add Expense'}</h3>
               <div className="space-y-4">
                 <div>
@@ -1122,7 +1122,7 @@ const SettlementHistoryFull: React.FC<{ salesmen: any[] }> = ({ salesmen }) => {
       ) : settlements.length === 0 ? (
         <div className="text-center py-8 text-gray-500">Please select a salesman to view settlement history.</div>
       ) : (
-        <table className="min-w-full divide-y divide-gray-200 mb-6">
+        <table className="min-w-full divide-y divide-gray-200 mb-6 overflow-x-auto">
           <thead className="bg-gray-50">
             <tr>
               <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Settlement #</th>

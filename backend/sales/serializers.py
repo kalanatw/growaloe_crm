@@ -152,7 +152,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'invoice_number', 'salesman', 'salesman_name', 'shop', 'shop_name',
             'invoice_date', 'due_date', 'subtotal', 'tax_amount', 'discount_amount',
-            'shop_margin', 'net_total', 'paid_amount', 'balance_due', 'total_amount', 'status', 
+            'discount_percentage', 'shop_margin', 'net_total', 'paid_amount', 'balance_due', 'total_amount', 'status', 
             'notes', 'terms_conditions', 'created_by', 'created_at', 'updated_at',
             'items', 'items_count'
         ]
@@ -188,7 +188,7 @@ class InvoiceCreateSerializer(serializers.ModelSerializer):
         model = Invoice
         fields = [
             'id', 'invoice_number', 'shop', 'due_date', 'tax_amount',
-            'discount_amount', 'shop_margin', 'notes', 'terms_conditions', 'items',
+            'discount_percentage', 'shop_margin', 'notes', 'terms_conditions', 'items',
             'subtotal', 'net_total', 'total_amount'
         ]
         read_only_fields = ['id', 'invoice_number', 'subtotal', 'net_total', 'total_amount']

@@ -12,10 +12,13 @@ import {
   CurrencyDollarIcon,
   ClockIcon,
   CheckCircleIcon,
-  XCircleIcon
+  XCircleIcon,
+  FlagIcon,
+  EyeIcon
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import { formatBalance, formatCurrency, formatCurrencyWithSign } from '../utils/currency';
+import { ShopMap } from '../components/maps/ShopMap';
 
 const getTransactionStatusIcon = (status: string) => {
   switch (status) {
@@ -50,7 +53,8 @@ export const ShopDetailPage: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [transactionsLoading, setTransactionsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'invoices'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'invoices' | 'location'>('overview');
+  const [isFlagged, setIsFlagged] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -112,16 +116,45 @@ export const ShopDetailPage: React.FC = () => {
     <Layout title={shop.name}>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center space-x-4">
-          <button
-            onClick={() => navigate('/shops')}
-            className="p-2 rounded-md text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
-          >
-            <ArrowLeftIcon className="w-5 h-5" />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">{shop.name}</h1>
-            <p className="text-gray-600 dark:text-gray-400">Shop Details & Balance History</p>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={() => navigate('/shops')}
+              className="p-2 rounded-md text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+            >
+              <ArrowLeftIcon className="w-5 h-5" />
+            </button>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900 dark:text-white">{shop.name}</h1>
+              <p className="text-gray-600 dark:text-gray-400">Shop Details & Balance History</p>
+            </div>
+          </div>
+          
+          {/* Shop Actions */}
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setIsFlagged(!isFlagged)}
+              className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                isFlagged
+                  ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-300 dark:hover:bg-red-800'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+              }`}
+              title={isFlagged ? 'Remove flag' : 'Flag this shop'}
+            >
+              <FlagIcon className="w-4 h-4" />
+              <span>{isFlagged ? 'Flagged' : 'Flag Shop'}</span>
+            </button>
+            
+            {shop.latitude && shop.longitude && (
+              <button
+                onClick={() => setActiveTab('location')}
+                className="flex items-center space-x-2 px-3 py-2 bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800 rounded-md text-sm font-medium transition-colors"
+                title="View shop location on map"
+              >
+                <EyeIcon className="w-4 h-4" />
+                <span>View on Map</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -192,7 +225,8 @@ export const ShopDetailPage: React.FC = () => {
             {[
               { key: 'overview', label: 'Overview' },
               { key: 'transactions', label: 'Transaction History' },
-              { key: 'invoices', label: 'Recent Invoices' }
+              { key: 'invoices', label: 'Recent Invoices' },
+              ...(shop.latitude && shop.longitude ? [{ key: 'location', label: 'Location' }] : [])
             ].map((tab) => (
               <button
                 key={tab.key}
@@ -368,6 +402,135 @@ export const ShopDetailPage: React.FC = () => {
               <p className="text-gray-500 dark:text-gray-400">
                 Invoice history will be displayed here. This feature can be implemented to show recent invoices for this shop.
               </p>
+            </div>
+          )}
+
+          {activeTab === 'location' && shop.latitude && shop.longitude && (
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md">
+              <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                    Shop Location
+                  </h3>
+                  {isFlagged && (
+                    <div className="flex items-center space-x-2 px-3 py-1 bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 rounded-full text-sm">
+                      <FlagIcon className="w-4 h-4" />
+                      <span>Flagged Shop</span>
+                    </div>
+                  )}
+                </div>
+                <p className="text-gray-600 dark:text-gray-400 mt-1">
+                  View {shop.name} on the map and get directions
+                </p>
+              </div>
+              
+              <div className="p-6">
+                {/* Location Details */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">Address</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">{shop.address}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">Coordinates</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        {(() => {
+                          const lat = typeof shop.latitude === 'number' ? shop.latitude : parseFloat(shop.latitude as any);
+                          const lng = typeof shop.longitude === 'number' ? shop.longitude : parseFloat(shop.longitude as any);
+                          
+                          if (!isNaN(lat) && !isNaN(lng)) {
+                            return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                          }
+                          return 'Invalid coordinates';
+                        })()}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">Contact Person</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">{shop.contact_person}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">Phone</p>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">{shop.phone}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex flex-wrap gap-3 mb-6">
+                  <a
+                    href={`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm"
+                  >
+                    <MapPinIcon className="w-4 h-4" />
+                    <span>Get Directions</span>
+                  </a>
+                  
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${shop.latitude},${shop.longitude}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm"
+                  >
+                    <EyeIcon className="w-4 h-4" />
+                    <span>View in Google Maps</span>
+                  </a>
+                  
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${shop.latitude}, ${shop.longitude}`);
+                      toast.success('Coordinates copied to clipboard!');
+                    }}
+                    className="flex items-center space-x-2 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 transition-colors text-sm"
+                  >
+                    <span>📋</span>
+                    <span>Copy Coordinates</span>
+                  </button>
+                </div>
+
+                {/* Map */}
+                <div className="border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden">
+                  <ShopMap
+                    shops={[{
+                      ...shop,
+                      // Highlight the shop if it's flagged
+                      name: isFlagged ? `🚩 ${shop.name}` : shop.name
+                    }]}
+                    height="500px"
+                    center={{ lat: shop.latitude, lng: shop.longitude }}
+                    onShopSelect={(selectedShop) => {
+                      toast.success(`Selected: ${selectedShop.name}`);
+                    }}
+                  />
+                </div>
+
+                {/* Map Legend */}
+                <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center space-x-4">
+                      <div className="flex items-center space-x-2">
+                        <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                        <span className="text-gray-600 dark:text-gray-400">Shop Location</span>
+                      </div>
+                      {isFlagged && (
+                        <div className="flex items-center space-x-2">
+                          <FlagIcon className="w-3 h-3 text-red-500" />
+                          <span className="text-red-600 dark:text-red-400">Flagged Shop</span>
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-gray-500 dark:text-gray-400">
+                      Click marker for details
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>

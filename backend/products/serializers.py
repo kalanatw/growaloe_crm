@@ -123,20 +123,22 @@ class SalesmanStockSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='batch.product.name', read_only=True)
     product_sku = serializers.CharField(source='batch.product.sku', read_only=True)
     product_base_price = serializers.DecimalField(source='batch.product.base_price', max_digits=10, decimal_places=2, read_only=True)
+    batch_cost = serializers.DecimalField(source='batch.unit_cost', max_digits=10, decimal_places=2, read_only=True)
     salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    batch_id = serializers.IntegerField(source='batch.id', read_only=True)
     expiry_date = serializers.DateField(source='batch.expiry_date', read_only=True)
     outstanding_quantity = serializers.SerializerMethodField()
     
     class Meta:
         model = BatchAssignment
         fields = [
-            'id', 'batch', 'batch_number', 'salesman', 'salesman_name',
-            'product_name', 'product_sku', 'product_base_price', 
+            'id', 'batch', 'batch_id', 'batch_number', 'salesman', 'salesman_name',
+            'product_name', 'product_sku', 'product_base_price', 'batch_cost',
             'delivered_quantity', 'returned_quantity', 'outstanding_quantity',
             'expiry_date', 'status', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'product_base_price', 'salesman_name', 'batch_number', 'expiry_date', 'outstanding_quantity']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'product_name', 'product_sku', 'product_base_price', 'batch_cost', 'salesman_name', 'batch_number', 'batch_id', 'expiry_date', 'outstanding_quantity']
     
     def get_outstanding_quantity(self, obj):
         """Get outstanding quantity (delivered - returned)"""

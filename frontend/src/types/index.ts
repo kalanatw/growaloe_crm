@@ -38,6 +38,8 @@ export interface Shop {
   credit_limit: number;
   current_balance: number;
   payment_terms?: string;
+  latitude?: number;
+  longitude?: number;
   is_active: boolean;
   date_created?: string;
   date_updated?: string;
@@ -80,6 +82,10 @@ export interface SalesmanStock {
   product_name: string;
   product_sku: string;
   product_base_price: number;
+  batch_id?: number;
+  batch_number?: string;
+  batch_cost?: number; // Cost price from the batch
+  expiry_date?: string;
   allocated_quantity: number;
   available_quantity: number;
   created_at: string;
@@ -157,16 +163,19 @@ export interface CreateInvoiceData {
   shop: number;
   due_date?: string;
   tax_amount?: number;
-  discount_amount?: number;
+  discount_percentage?: number; // Discount as percentage (like margins)
   shop_margin?: number;
   notes?: string;
   terms_conditions?: string;
   items: {
     product: number;
+    batch_id?: number; // Track which batch is being used
     quantity: number;
     unit_price: number;
+    batch_cost?: number; // Batch cost price
     salesman_margin?: number;
     shop_margin?: number;
+    effective_shop_margin?: number; // Shop margin + discount percentage
   }[];
 }
 
@@ -178,6 +187,8 @@ export interface CreateShopData {
   email?: string;
   shop_margin?: number;
   credit_limit?: number;
+  latitude?: number;
+  longitude?: number;
   is_active?: boolean;
 }
 
@@ -603,12 +614,18 @@ export interface SalesmanAvailableProduct {
   base_price: number;
   cost_price: number;
   unit: string;
+  batch_id?: number;
+  batch_number?: string;
+  batch_cost?: number;
+  expiry_date?: string;
 }
 
 export interface SimplifiedInvoiceItemData {
   product: number;
+  batch_id?: number;
   quantity: number;
   unit_price: number;
+  batch_cost?: number;
 }
 
 export interface CreateSimplifiedInvoiceData {

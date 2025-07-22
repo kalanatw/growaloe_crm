@@ -72,6 +72,9 @@ class Shop(models.Model):
     email = models.EmailField(blank=True, null=True)
     shop_margin = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)  # Percentage
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    # Location fields for mapping
+    latitude = models.DecimalField(max_digits=10, decimal_places=8, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=11, decimal_places=8, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
