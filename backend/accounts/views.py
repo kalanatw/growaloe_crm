@@ -510,10 +510,7 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Query or location is required'}, status=400)
         
         # Get Google Maps API key from environment
-        api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', None)
-        if not api_key:
-            # Fallback to hardcoded key for now
-            api_key = 'AIzaSyAFxiUSF7bacQEx9TGQJqPvxw6G92M61ZE'
+        api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', None)      
         
         try:
             if query:
@@ -583,10 +580,10 @@ class ShopViewSet(viewsets.ModelViewSet):
         
         # Get Google Maps API key from environment
         api_key = getattr(settings, 'GOOGLE_MAPS_API_KEY', None)
+
         if not api_key:
-            # Fallback to hardcoded key for now
-            api_key = 'AIzaSyAFxiUSF7bacQEx9TGQJqPvxw6G92M61ZE'
-        
+            return Response({'error': 'Google Maps API key is not configured'}, status=500)
+
         try:
             url = f"https://maps.googleapis.com/maps/api/geocode/json"
             params = {

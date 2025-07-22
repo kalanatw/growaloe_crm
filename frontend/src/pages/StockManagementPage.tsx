@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Layout } from '../components/Layout';
 import { LoadingCard } from '../components/LoadingSpinner';
-import { 
-  Package, 
-  Plus, 
-  Minus, 
-  AlertTriangle, 
-  TrendingUp, 
+import {
+  Package,
+  Plus,
+  Minus,
+  AlertTriangle,
+  TrendingUp,
   TrendingDown,
   RefreshCw,
   Eye
@@ -54,8 +54,9 @@ export const StockManagementPage: React.FC = () => {
     notes: '',
     reason: 'adjustment' as 'adjustment' | 'damage' | 'return',
     batch_number: '',
+    manufacturing_date: '',
     expiry_date: '',
-    cost_per_unit: ''
+    mrp: '' // Changed from cost_per_unit to mrp for clarity
   });
 
   const resetStockOperation = () => {
@@ -64,8 +65,9 @@ export const StockManagementPage: React.FC = () => {
       notes: '',
       reason: 'adjustment',
       batch_number: '',
+      manufacturing_date: '',
       expiry_date: '',
-      cost_per_unit: ''
+      mrp: ''
     });
   };
 
@@ -76,13 +78,13 @@ export const StockManagementPage: React.FC = () => {
   const loadProducts = async () => {
     try {
       setIsLoading(true);
-      
+
       // Load stock summary (batch-based) and products
       const [stockData, productsData] = await Promise.all([
         productService.getProductStockSummary(),
         productService.getProducts()
       ]);
-      
+
       setStockSummary(stockData.results || stockData);
       setProducts(productsData.results || productsData);
     } catch (error) {
@@ -110,17 +112,27 @@ export const StockManagementPage: React.FC = () => {
       if (stockOperation.batch_number) {
         addStockData.batch_number = stockOperation.batch_number;
       }
+      if (stockOperation.manufacturing_date) {
+        addStockData.manufacturing_date = stockOperation.manufacturing_date;
+      }
       if (stockOperation.expiry_date) {
         addStockData.expiry_date = stockOperation.expiry_date;
       }
-      if (stockOperation.cost_per_unit) {
-        addStockData.cost_per_unit = parseFloat(stockOperation.cost_per_unit);
+      if (stockOperation.mrp) {
+        const newMrp = parseFloat(stockOperation.mrp);
+        addStockData.cost_per_unit = newMrp;
+
+        // If MRP is different from current base price, update the product's base price
+        if (newMrp !== selectedProduct.base_price) {
+          addStockData.update_base_price = true;
+          addStockData.new_base_price = newMrp;
+        }
       }
 
       const result = await stockManagementService.addStock(selectedProduct.id, addStockData);
 
       console.log('Add stock result:', result);
-      
+
       if (result.success) {
         toast.success(result.message);
         setShowAddModal(false);
@@ -207,7 +219,7 @@ export const StockManagementPage: React.FC = () => {
               </p>
             </div>
           </div>
-          
+
           <button
             onClick={loadProducts}
             className="btn-secondary flex items-center space-x-2"
@@ -260,9 +272,8 @@ export const StockManagementPage: React.FC = () => {
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                   Low Stock Alerts
                 </p>
-                <p className={`${getCardAmountClass(lowStockProducts.length)} ${
-                  lowStockProducts.length > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-white'
-                }`}>
+                <p className={`${getCardAmountClass(lowStockProducts.length)} ${lowStockProducts.length > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-white'
+                  }`}>
                   {lowStockProducts.length}
                 </p>
               </div>
@@ -313,7 +324,7 @@ export const StockManagementPage: React.FC = () => {
               Product Inventory
             </h3>
           </div>
-          
+
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
               <thead className="bg-gray-50 dark:bg-gray-800">
@@ -355,11 +366,10 @@ export const StockManagementPage: React.FC = () => {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <span className={`text-sm font-medium ${
-                          isLowStock
-                            ? 'text-red-600 dark:text-red-400' 
+                        <span className={`text-sm font-medium ${isLowStock
+                            ? 'text-red-600 dark:text-red-400'
                             : 'text-gray-900 dark:text-white'
-                        }`}>
+                          }`}>
                           {stockItem.available_stock}
                         </span>
                       </td>
@@ -466,6 +476,18 @@ export const StockManagementPage: React.FC = () => {
                         Leave empty to auto-generate batch number
                       </p>
                     </div>
+                    <div>
+                      <label className="label">Manufacturing Date (Optional)</label>
+                      <input
+                        type="date"
+                        value={stockOperation.manufacturing_date}
+                        onChange={(e) => setStockOperation(prev => ({ ...prev, manufacturing_date: e.target.value }))}
+                        className="input"
+                      />
+                      <p className="text-sm text-gray-500 mt-1">
+                        Date when the product was manufactured
+                      </p>
+                    </div>
 
                     <div>
                       <label className="label">Expiry Date (Optional)</label>
@@ -475,21 +497,29 @@ export const StockManagementPage: React.FC = () => {
                         onChange={(e) => setStockOperation(prev => ({ ...prev, expiry_date: e.target.value }))}
                         className="input"
                       />
+                      <p className="text-sm text-gray-500 mt-1">
+                        Date when the product expires
+                      </p>
                     </div>
 
                     <div>
-                      <label className="label">Cost per Unit (Optional)</label>
+                      <label className="label">MRP (Maximum Retail Price)</label>
                       <input
                         type="number"
                         step="0.01"
-                        value={stockOperation.cost_per_unit}
-                        onChange={(e) => setStockOperation(prev => ({ ...prev, cost_per_unit: e.target.value }))}
+                        value={stockOperation.mrp}
+                        onChange={(e) => setStockOperation(prev => ({ ...prev, mrp: e.target.value }))}
                         className="input"
-                        placeholder={`Default: ${selectedProduct.cost_price}`}
+                        placeholder={`Current base price: ${formatCurrency(selectedProduct.base_price)}`}
                         min="0"
                       />
                       <p className="text-sm text-gray-500 mt-1">
-                        Uses product cost price if not specified: {formatCurrency(selectedProduct.cost_price)}
+                        Current base price: {formatCurrency(selectedProduct.base_price)}
+                        {stockOperation.mrp && parseFloat(stockOperation.mrp) !== selectedProduct.base_price && (
+                          <span className="block text-orange-600 dark:text-orange-400 font-medium">
+                            ⚠️ This will update the product's base price to {formatCurrency(parseFloat(stockOperation.mrp))}
+                          </span>
+                        )}
                       </p>
                     </div>
 
@@ -574,8 +604,8 @@ export const StockManagementPage: React.FC = () => {
                       <label className="label">Reason</label>
                       <select
                         value={stockOperation.reason}
-                        onChange={(e) => setStockOperation(prev => ({ 
-                          ...prev, 
+                        onChange={(e) => setStockOperation(prev => ({
+                          ...prev,
                           reason: e.target.value as 'adjustment' | 'damage' | 'return'
                         }))}
                         className="input"
@@ -606,10 +636,10 @@ export const StockManagementPage: React.FC = () => {
                   >
                     Reduce Stock
                   </button>
-                  <button                      onClick={() => {
-                        setShowReduceModal(false);
-                        resetStockOperation();
-                      }}
+                  <button onClick={() => {
+                    setShowReduceModal(false);
+                    resetStockOperation();
+                  }}
                     className="btn-secondary mt-3 w-full sm:mt-0 sm:w-auto"
                   >
                     Cancel
