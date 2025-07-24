@@ -1,6 +1,6 @@
 import React from 'react';
-import { Menu, Bell, Search, Home } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { Menu, Bell, Search } from 'lucide-react';
+import { NavigationButtons } from './NavigationButtons';
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -8,7 +8,6 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onMenuClick, title }) => {
-  const navigate = useNavigate();
   return (
     <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 header-desktop">
       <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
@@ -24,15 +23,9 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick, title }) => {
           </h1>
         </div>
 
-        {/* Home Icon Centered */}
+        {/* Navigation Buttons Centered */}
         <div className="flex-1 flex justify-center">
-          <button
-            className="p-2 rounded-lg text-primary-600 hover:text-primary-800 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none"
-            onClick={() => navigate('/')}
-            aria-label="Go to Dashboard"
-          >
-            <Home className="h-7 w-7" />
-          </button>
+          <NavigationButtons />
         </div>
 
         <div className="flex items-center space-x-4">

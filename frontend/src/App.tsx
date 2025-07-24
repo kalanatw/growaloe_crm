@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from 'react-query';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { NavigationHistoryProvider } from './contexts/NavigationHistoryContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -46,8 +47,9 @@ function App() {
               v7_relativeSplatPath: true,
             }}
           >
-            <div className="App">
-              <Routes>
+            <NavigationHistoryProvider>
+              <div className="App">
+                <Routes>
                 <Route path="/login" element={<LoginPage />} />
                 <Route
                   path="/"
@@ -194,18 +196,19 @@ function App() {
                   }
                 />
                 <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-              <Toaster
-                position="top-right"
-                toastOptions={{
-                  duration: 4000,
-                  style: {
-                    background: 'var(--toast-bg)',
-                    color: 'var(--toast-color)',
-                  },
-                }}
-              />
-            </div>
+                </Routes>
+                <Toaster
+                  position="top-right"
+                  toastOptions={{
+                    duration: 4000,
+                    style: {
+                      background: 'var(--toast-bg)',
+                      color: 'var(--toast-color)',
+                    },
+                  }}
+                />
+              </div>
+            </NavigationHistoryProvider>
           </Router>
         </AuthProvider>
       </ThemeProvider>

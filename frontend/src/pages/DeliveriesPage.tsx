@@ -130,11 +130,11 @@ export const DeliveriesPage: React.FC = () => {
   }
 
   return (
-    <Layout title="Salesman-Centric Delivery Management">
+    <Layout title="Deliveries">
       <div className="space-y-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Delivery Management</h1>
+            {/* <h1 className="text-2xl font-bold text-gray-900">Delivery Management</h1> */}
             <p className="text-gray-600">Manage deliveries and settlements by salesman</p>
           </div>
           {user?.role === 'owner' && (

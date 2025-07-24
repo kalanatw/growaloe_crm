@@ -123,13 +123,13 @@ export const SalesmanDeliveriesPage: React.FC = () => {
   }
 
   return (
-    <Layout title="Salesman-Centric Delivery Management">
+    <Layout title="Salesman">
       <div className="space-y-6">
         {/* Header */}
         <div className="flex justify-between items-center">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Delivery Management</h1>
-            <p className="text-gray-600">Manage deliveries and settlements by salesman</p>
+            {/* <p className="text-gray-600">Manage deliveries and settlements by salesman</p> */}
           </div>
           
           <div className="flex items-center space-x-3">
