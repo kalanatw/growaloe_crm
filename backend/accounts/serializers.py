@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import authenticate
-from .models import User, Owner, Salesman, Shop, MarginPolicy
+from django.db import models
+from .models import User, Owner, Salesman, Shop, MarginPolicy, SalesmanCashCollection, SalesmanCashTransaction
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -103,20 +104,73 @@ class OwnerSerializer(serializers.ModelSerializer):
 
 
 class SalesmanSerializer(serializers.ModelSerializer):
-    """Serializer for Salesman model"""
+    """Serializer for Salesman model with balance information"""
     user = UserProfileSerializer(read_only=True)
     owner = OwnerSerializer(read_only=True)
     user_id = serializers.IntegerField(write_only=True)
     owner_id = serializers.IntegerField(write_only=True)
+    
+    # Balance fields
+    current_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_cash_collected = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_cash_settled = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    net_cash_position = serializers.SerializerMethodField()
+    outstanding_balance = serializers.SerializerMethodField()
+    
+    # Additional computed fields
+    pending_deliveries_value = serializers.SerializerMethodField()
+    outstanding_invoices_value = serializers.SerializerMethodField()
     
     class Meta:
         model = Salesman
         fields = [
             'id', 'owner', 'owner_id', 'user', 'user_id', 'name',
             'description', 'profit_margin', 'is_active',
+            'current_balance', 'total_cash_collected', 'total_cash_settled',
+            'net_cash_position', 'outstanding_balance', 'last_settlement_date',
+            'pending_deliveries_value', 'outstanding_invoices_value',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'current_balance', 
+                          'total_cash_collected', 'total_cash_settled', 'last_settlement_date']
+    
+    def get_net_cash_position(self, obj):
+        """Calculate net cash position"""
+        return float(obj.net_cash_position)
+    
+    def get_outstanding_balance(self, obj):
+        """Calculate outstanding balance"""
+        return float(obj.outstanding_balance)
+    
+    def get_pending_deliveries_value(self, obj):
+        """Calculate pending deliveries value (outstanding batch assignments)"""
+        from products.models import BatchAssignment
+        from django.db.models import Sum, F
+        from decimal import Decimal
+        
+        pending_value = BatchAssignment.objects.filter(
+            salesman=obj,
+            status__in=['delivered', 'partial']
+        ).aggregate(
+            total=Sum(F('delivered_quantity') - F('returned_quantity'), output_field=models.DecimalField(max_digits=12, decimal_places=2))
+        )['total'] or Decimal('0.00')
+        
+        return float(pending_value)
+    
+    def get_outstanding_invoices_value(self, obj):
+        """Calculate outstanding invoices value for this salesman"""
+        from sales.models import Invoice
+        from django.db.models import Sum
+        from decimal import Decimal
+        
+        outstanding_value = Invoice.objects.filter(
+            salesman=obj,
+            status__in=['pending', 'partial']
+        ).aggregate(
+            total=Sum('balance_due')
+        )['total'] or Decimal('0.00')
+        
+        return float(outstanding_value)
 
 
 class CreateSalesmanSerializer(serializers.ModelSerializer):
@@ -239,3 +293,61 @@ class SalesmanSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Salesman
         fields = ['id', 'name', 'profit_margin', 'shops_count']
+
+
+class SalesmanCashCollectionSerializer(serializers.ModelSerializer):
+    """Serializer for SalesmanCashCollection model"""
+    collected_by_name = serializers.CharField(source='collected_by.get_full_name', read_only=True)
+    salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
+    
+    class Meta:
+        model = SalesmanCashCollection
+        fields = [
+            'id', 'salesman', 'salesman_name', 'amount', 'collection_date', 
+            'collection_method', 'reference_number', 'notes',
+            'salesman_balance_before', 'salesman_balance_after',
+            'collected_by', 'collected_by_name', 'status',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'salesman_name', 'salesman_balance_before', 'salesman_balance_after',
+            'collected_by', 'collected_by_name', 'status', 'created_at', 'updated_at'
+        ]
+    
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero.")
+        return value
+    
+    def validate(self, data):
+        # Additional validation can be added here
+        return data
+
+
+class OutstandingCashSummarySerializer(serializers.Serializer):
+    """Serializer for outstanding cash summary"""
+    salesman_id = serializers.IntegerField()
+    salesman_name = serializers.CharField()
+    current_balance = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_cash_from_invoices = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_cash_collected_by_owner = serializers.DecimalField(max_digits=10, decimal_places=2)
+    outstanding_cash_with_salesman = serializers.DecimalField(max_digits=10, decimal_places=2)
+    last_collection_date = serializers.DateField(allow_null=True)
+
+
+class SalesmanCashTransactionSerializer(serializers.ModelSerializer):
+    """Serializer for SalesmanCashTransaction model (bank book view)"""
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    transaction_type_display = serializers.CharField(source='get_transaction_type_display', read_only=True)
+    
+    class Meta:
+        model = SalesmanCashTransaction
+        fields = [
+            'id', 'transaction_type', 'transaction_type_display', 'amount', 
+            'balance_before', 'balance_after', 'description', 'reference_type', 
+            'reference_id', 'notes', 'created_by', 'created_by_name', 
+            'invoice', 'cash_collection', 'created_at'
+        ]
+        read_only_fields = [
+            'id', 'transaction_type_display', 'created_by_name', 'created_at'
+        ]

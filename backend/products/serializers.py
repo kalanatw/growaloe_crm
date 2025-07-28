@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Sum
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from .models import Category, Product, StockMovement, Delivery, DeliveryItem, Batch, BatchTransaction, BatchAssignment, BatchDefect, DeliverySettlement, DeliverySettlementItem, DeliveryExpense, ProductReturn
@@ -226,10 +226,12 @@ class DeliveryBatchAssignmentSerializer(serializers.ModelSerializer):
 
 
 class DeliveryExpenseSerializer(serializers.ModelSerializer):
+    settled_by_name = serializers.CharField(source='settled_by.get_full_name', read_only=True)
+    
     class Meta:
         model = DeliveryExpense
-        fields = ['id', 'delivery', 'category', 'amount', 'ref_id', 'notes', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'delivery', 'category', 'amount', 'ref_id', 'notes', 'is_settled', 'settled_at', 'settled_by', 'settled_by_name', 'created_at']
+        read_only_fields = ['id', 'is_settled', 'settled_at', 'settled_by', 'settled_by_name', 'created_at']
 
     def validate_category(self, value):
         if not value:
@@ -250,6 +252,13 @@ class DeliverySerializer(serializers.ModelSerializer):
     total_items = serializers.SerializerMethodField(read_only=True)
     total_value = serializers.SerializerMethodField(read_only=True)
     expenses = DeliveryExpenseSerializer(many=True, read_only=True)
+    settlement_summary = serializers.SerializerMethodField(read_only=True)
+    
+    # Invoice settlement data
+    invoice_settlements_total = serializers.SerializerMethodField(read_only=True)
+    uncollected_settlements_total = serializers.SerializerMethodField(read_only=True)
+    settlement_count = serializers.SerializerMethodField(read_only=True)
+    settlement_breakdown = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Delivery
@@ -257,7 +266,8 @@ class DeliverySerializer(serializers.ModelSerializer):
             'id', 'delivery_number', 'salesman', 'salesman_name', 'status',
             'delivery_date', 'notes', 'created_by', 'created_by_name',
             'total_items', 'total_value', 'items', 'batch_assignments',
-            'expenses', 'created_at', 'updated_at'
+            'expenses', 'settlement_summary', 'invoice_settlements_total', 'uncollected_settlements_total', 
+            'settlement_count', 'settlement_breakdown', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'delivery_number', 'salesman_name', 'created_by_name',
@@ -288,6 +298,270 @@ class DeliverySerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DecimalField)
     def get_total_value(self, obj):
         return obj.total_value
+    
+    @extend_schema_field(serializers.DecimalField)
+    def get_invoice_settlements_total(self, obj):
+        """Get total amount from invoice settlements for this delivery's salesman since delivery date"""
+        from sales.models import Invoice
+        invoices = Invoice.objects.filter(
+            salesman=obj.salesman,
+            invoice_date__gte=obj.created_at,
+            status__in=['paid', 'partial']
+        )
+        return sum(invoice.paid_amount or 0 for invoice in invoices)
+    
+    @extend_schema_field(serializers.DecimalField)
+    def get_uncollected_settlements_total(self, obj):
+        """Get total uncollected amount from settlements for this delivery's salesman since delivery date"""
+        from sales.models import Invoice
+        invoices = Invoice.objects.filter(
+            salesman=obj.salesman,
+            invoice_date__gte=obj.created_at,
+            status__in=['pending', 'partial']
+        )
+        return sum((invoice.net_total - (invoice.paid_amount or 0)) for invoice in invoices)
+    
+    @extend_schema_field(serializers.IntegerField)
+    def get_settlement_count(self, obj):
+        """Get count of invoices for this delivery's salesman since delivery date"""
+        from sales.models import Invoice
+        return Invoice.objects.filter(
+            salesman=obj.salesman,
+            invoice_date__gte=obj.created_at
+        ).count()
+    
+    @extend_schema_field(serializers.DictField)
+    def get_settlement_breakdown(self, obj):
+        """Get detailed settlement breakdown by payment method for this delivery's salesman"""
+        from sales.models import Invoice, Transaction, InvoiceSettlement, SettlementPayment
+        from django.db.models import Sum
+        
+        # Get all invoices for this salesman since delivery date
+        invoices = Invoice.objects.filter(
+            salesman=obj.salesman,
+            invoice_date__gte=obj.created_at
+        )
+        
+        # Payment method breakdown from transactions
+        payment_breakdown = Transaction.objects.filter(
+            invoice__in=invoices
+        ).values('payment_method').annotate(
+            total_amount=Sum('amount'),
+            transaction_count=models.Count('id')
+        ).order_by('-total_amount')
+        
+        # Settlement breakdown from invoice settlements
+        settlement_breakdown = SettlementPayment.objects.filter(
+            settlement__invoice__in=invoices
+        ).values('payment_method').annotate(
+            total_amount=Sum('amount'),
+            payment_count=models.Count('id')
+        ).order_by('-total_amount')
+        
+        # Combine and format the data
+        payment_methods = {}
+        
+        # Add transaction data
+        for payment in payment_breakdown:
+            method = payment['payment_method']
+            payment_methods[method] = payment_methods.get(method, {
+                'method': method,
+                'total_amount': 0,
+                'transaction_count': 0,
+                'settlement_count': 0
+            })
+            payment_methods[method]['total_amount'] += float(payment['total_amount'])
+            payment_methods[method]['transaction_count'] += payment['transaction_count']
+        
+        # Add settlement data
+        for settlement in settlement_breakdown:
+            method = settlement['payment_method']
+            payment_methods[method] = payment_methods.get(method, {
+                'method': method,
+                'total_amount': 0,
+                'transaction_count': 0,
+                'settlement_count': 0
+            })
+            payment_methods[method]['total_amount'] += float(settlement['total_amount'])
+            payment_methods[method]['settlement_count'] += settlement['payment_count']
+        
+        # Calculate totals
+        total_collected = sum(pm['total_amount'] for pm in payment_methods.values())
+        total_invoice_amount = sum(invoice.net_total for invoice in invoices)
+        outstanding_balance = float(total_invoice_amount) - total_collected
+        
+        return {
+            'payment_methods': list(payment_methods.values()),
+            'summary': {
+                'total_invoice_amount': float(total_invoice_amount),
+                'total_collected': total_collected,
+                'outstanding_balance': outstanding_balance,
+                'collection_rate': (total_collected / float(total_invoice_amount) * 100) if total_invoice_amount > 0 else 0,
+                'invoice_count': invoices.count()
+            },
+            'recent_settlements': self._get_recent_settlements(invoices)
+        }
+    
+    def _get_recent_settlements(self, invoices):
+        """Get recent settlement transactions for the invoices"""
+        from sales.models import Transaction, InvoiceSettlement
+        
+        # Get recent transactions
+        recent_transactions = Transaction.objects.filter(
+            invoice__in=invoices
+        ).select_related('invoice', 'invoice__shop').order_by('-transaction_date')[:5]
+        
+        # Get recent settlements
+        recent_settlements = InvoiceSettlement.objects.filter(
+            invoice__in=invoices
+        ).select_related('invoice', 'invoice__shop').order_by('-settlement_date')[:5]
+        
+        settlements_data = []
+        
+        # Add transaction data
+        for transaction in recent_transactions:
+            settlements_data.append({
+                'type': 'transaction',
+                'id': transaction.id,
+                'date': transaction.transaction_date.isoformat(),
+                'amount': float(transaction.amount),
+                'payment_method': transaction.payment_method,
+                'reference': transaction.reference_number,
+                'invoice_number': transaction.invoice.invoice_number,
+                'shop_name': transaction.invoice.shop.name,
+                'notes': transaction.notes
+            })
+        
+        # Add settlement data
+        for settlement in recent_settlements:
+            settlements_data.append({
+                'type': 'settlement',
+                'id': settlement.id,
+                'date': settlement.settlement_date.isoformat(),
+                'amount': float(settlement.total_amount),
+                'payment_method': 'multiple',
+                'invoice_number': settlement.invoice.invoice_number,
+                'shop_name': settlement.invoice.shop.name,
+                'notes': settlement.notes
+            })
+        
+        # Sort by date and return top 5
+        settlements_data.sort(key=lambda x: x['date'], reverse=True)
+        return settlements_data[:5]
+    
+    @extend_schema_field(serializers.DictField)
+    def get_settlement_summary(self, obj):
+        """
+        Calculate comprehensive settlement summary for owner view.
+        
+        Returns:
+            dict: Settlement summary with cash flow and product tracking
+        """
+        from sales.models import Invoice, Transaction
+        from decimal import Decimal
+        
+        # Calculate delivery value from items
+        delivery_value = sum(
+            item.quantity * item.unit_price 
+            for item in obj.items.all()
+        )
+        
+        # Get all invoices since delivery date
+        invoices = Invoice.objects.filter(
+            salesman=obj.salesman,
+            invoice_date__gte=obj.created_at.date()
+        )
+        
+        # Calculate cash metrics
+        total_invoice_amount = sum(invoice.net_total for invoice in invoices)
+        total_cash_collected = sum(invoice.paid_amount or 0 for invoice in invoices)
+        outstanding_from_customers = sum(invoice.balance_due for invoice in invoices)
+        
+        # Calculate settlement metrics
+        cash_to_settle_to_owner = total_cash_collected
+        product_value_in_circulation = delivery_value - total_cash_collected
+        collection_rate = (
+            (total_cash_collected / delivery_value * 100) 
+            if delivery_value > 0 else 0
+        )
+        
+        # Invoice status breakdown
+        paid_invoices = invoices.filter(status='paid').count()
+        pending_invoices = invoices.filter(status='pending').count()
+        partial_invoices = invoices.filter(status='partial').count()
+        
+        # Daily settlement breakdown
+        daily_settlements = []
+        daily_collections = invoices.filter(
+            paid_amount__gt=0
+        ).extra(
+            select={'date': 'DATE(invoice_date)'}
+        ).values('date').annotate(
+            daily_cash=models.Sum('paid_amount'),
+            invoice_count=models.Count('id')
+        ).order_by('-date')
+        
+        for day in daily_collections:
+            daily_settlements.append({
+                'date': day['date'],
+                'cash_collected': float(day['daily_cash']),
+                'invoice_count': day['invoice_count'],
+                'settlement_due': float(day['daily_cash'])  # All cash goes to owner
+            })
+        
+        # Payment method breakdown
+        payment_methods = Transaction.objects.filter(
+            invoice__in=invoices
+        ).values('payment_method').annotate(
+            total_amount=models.Sum('amount'),
+            transaction_count=models.Count('id')
+        ).order_by('-total_amount')
+        
+        return {
+            'delivery_metrics': {
+                'delivery_value': float(delivery_value),
+                'delivery_date': obj.delivery_date.isoformat(),
+                'delivery_status': obj.status,
+                'total_items': obj.items.count()
+            },
+            'cash_flow': {
+                'total_cash_collected': float(total_cash_collected),
+                'cash_to_settle_to_owner': float(cash_to_settle_to_owner),
+                'outstanding_from_customers': float(outstanding_from_customers),
+                'collection_rate_percentage': round(collection_rate, 2)
+            },
+            'product_tracking': {
+                'product_value_in_circulation': float(product_value_in_circulation),
+                'circulation_percentage': round(
+                    (product_value_in_circulation / delivery_value * 100) 
+                    if delivery_value > 0 else 0, 2
+                ),
+                'conversion_rate': round(
+                    (total_cash_collected / delivery_value * 100) 
+                    if delivery_value > 0 else 0, 2
+                )
+            },
+            'invoice_breakdown': {
+                'total_invoices': invoices.count(),
+                'total_invoice_amount': float(total_invoice_amount),
+                'paid_invoices': paid_invoices,
+                'pending_invoices': pending_invoices,
+                'partial_invoices': partial_invoices
+            },
+            'daily_settlements': daily_settlements,
+            'payment_methods': [
+                {
+                    'method': pm['payment_method'],
+                    'amount': float(pm['total_amount']),
+                    'transaction_count': pm['transaction_count'],
+                    'percentage': round(
+                        (pm['total_amount'] / total_cash_collected * 100) 
+                        if total_cash_collected > 0 else 0, 2
+                    )
+                }
+                for pm in payment_methods
+            ]
+        }
 
 
 class CreateDeliverySerializer(serializers.ModelSerializer):
@@ -369,6 +643,7 @@ class DeliverySettlementItemSerializer(serializers.ModelSerializer):
 class DeliverySettlementSerializer(serializers.ModelSerializer):
     salesman_name = serializers.CharField(source='salesman.user.get_full_name', read_only=True)
     settled_by_name = serializers.CharField(source='settled_by.get_full_name', read_only=True)
+    physical_cash_collected_by_name = serializers.CharField(source='physical_cash_collected_by.get_full_name', read_only=True)
     items = DeliverySettlementItemSerializer(many=True, read_only=True)
     efficiency_rate = serializers.ReadOnlyField()
     
@@ -379,6 +654,8 @@ class DeliverySettlementSerializer(serializers.ModelSerializer):
             'total_delivered_value', 'total_sold_value', 'total_returned_value', 'total_margin_earned',
             'total_delivered_items', 'total_sold_items', 'total_returned_items',
             'status', 'settlement_notes', 'settled_by', 'settled_by_name', 'efficiency_rate',
+            'physical_cash_collected', 'physical_cash_collected_date', 'physical_cash_collected_by',
+            'physical_cash_collected_by_name', 'physical_cash_amount', 'cash_collection_notes',
             'items', 'created_at', 'updated_at'
         ]
         read_only_fields = [
@@ -421,6 +698,17 @@ class SettleSalesmanRequestSerializer(serializers.Serializer):
     settlement_notes = serializers.CharField(required=False, allow_blank=True)
     return_all_stock = serializers.BooleanField(default=True)
     create_settlement_record = serializers.BooleanField(default=True)
+    
+    # Cash flow fields
+    cash_settlement_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    settlement_method = serializers.ChoiceField(
+        choices=[
+            ('full_cash', 'Full Cash Settlement'),
+            ('partial_cash', 'Partial Cash Settlement'),
+            ('balance_carry', 'Carry Balance Forward'),
+        ],
+        default='full_cash'
+    )
 
 
 class SalesmanDailySummarySerializer(serializers.Serializer):

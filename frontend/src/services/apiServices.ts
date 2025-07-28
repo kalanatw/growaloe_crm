@@ -24,6 +24,31 @@ import {
   CreateDeliveryData,
 } from '../types';
 
+// Type alias for invoice service response to maintain compatibility
+export type InvoiceServiceResponse = {
+  id: number;
+  invoice_number: string;
+  shop_name: string;
+  invoice_date: string;
+  net_total: number;
+  paid_amount: number;
+  balance_due: number;
+  status: string;
+  due_date?: string;
+  salesman?: any;
+  salesman_name?: string;
+  shop?: any;
+  subtotal?: number;
+  tax_amount?: number;
+  discount_amount?: number;
+  shop_margin?: number;
+  notes?: string;
+  terms_conditions?: string;
+  created_by?: any;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export const authService = {
   login: async (username: string, password: string) => {
     return apiClient.post<{ access: string; refresh: string }>('/auth/login/', {
@@ -149,7 +174,7 @@ export const productService = {
 
 export const invoiceService = {
   getInvoices: async (params?: any): Promise<{ results: Invoice[] }> => {
-    return apiClient.get<{ results: Invoice[] }>('/sales/invoices/', params);
+    return apiClient.get('/sales/invoices/', params);
   },
 
   getInvoice: async (id: number): Promise<Invoice> => {
@@ -530,11 +555,22 @@ export const deliveryService = {
     settlement_notes?: string;
     return_all_stock?: boolean;
     create_settlement_record?: boolean;
+    cash_settlement_amount?: number;
+    settlement_method?: 'full_cash' | 'partial_cash' | 'balance_carry';
   }): Promise<{
     message: string;
     salesman_name: string;
     settlement_date: string;
     settled_deliveries: number;
+    cash_flow: {
+      total_collections: number;
+      total_expenses: number;
+      net_cash_available: number;
+      current_balance: number;
+      last_settlement_date: string | null;
+    };
+    cash_settlement_amount: number;
+    remaining_balance: number;
     summary: {
       total_delivered_items: number;
       total_sold_items: number;
@@ -551,6 +587,104 @@ export const deliveryService = {
       ...data,
       salesman_id: salesmanId,
     });
+  },
+
+  // New delivery settlement methods with cash management
+  getDeliverySettlementPreview: async (salesmanId: number): Promise<{
+    delivery: {
+      id: number;
+      delivery_number: string;
+      salesman_name: string;
+      delivery_date: string;
+    };
+    products: Array<{
+      product_name: string;
+      delivered_quantity: number;
+      sold_quantity: number;
+      returned_quantity: number;
+      outstanding_quantity: number;
+      unit_price: number;
+      delivered_value: number;
+      sold_value: number;
+      outstanding_value: number;
+    }>;
+    cash_breakdown: {
+      invoice_collections: number;
+      delivery_expenses: number;
+      return_value: number;
+      net_cash_available: number;
+      payment_methods: Array<{
+        method: string;
+        amount: number;
+        reference?: string;
+        bank?: string;
+      }>;
+    };
+    salesman_balance: {
+      current_balance: number;
+      balance_after_settlement: number;
+    };
+  }> => {
+    return apiClient.get(`/products/deliveries/settlement_preview/?salesman_id=${salesmanId}`);
+  },
+
+  processDeliverySettlement: async (data: {
+    salesman_id: number;
+    settlement_notes?: string;
+    cash_settlement_amount: number;
+    settlement_method: 'full_cash' | 'partial_cash' | 'balance_carry';
+    return_all_stock?: boolean;
+    create_settlement_record?: boolean;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    settlement_id?: number;
+    cash_transaction_id?: number;
+    cash_collected: number;
+    new_balance: number;
+    delivery_status: string;
+    delivery_id: number;
+  }> => {
+    return apiClient.post('/products/deliveries/process_settlement/', data);
+  },
+
+  // Get detailed invoice settlement breakdown for a delivery
+  getDeliverySettlementBreakdown: async (deliveryId: number): Promise<{
+    delivery_info: {
+      id: number;
+      delivery_number: string;
+      salesman_name: string;
+      delivery_date: string;
+      total_value: number;
+      status: string;
+    };
+    settlement_summary: {
+      total_invoice_amount: number;
+      total_collected: number;
+      outstanding_balance: number;
+      collection_rate: number;
+      invoice_count: number;
+    };
+    payment_methods: Array<{
+      method: string;
+      total_amount: number;
+      transaction_count: number;
+      settlement_count: number;
+      percentage: number;
+    }>;
+    recent_settlements: Array<{
+      type: 'transaction' | 'settlement';
+      id: number;
+      date: string;
+      amount: number;
+      payment_method: string;
+      invoice_number: string;
+      shop_name: string;
+      reference?: string;
+      notes?: string;
+    }>;
+  }> => {
+    return apiClient.get(`/products/deliveries/${deliveryId}/settlement_breakdown/`);
   },
 
   getDailySummary: async (date?: string): Promise<{
@@ -659,8 +793,8 @@ export const deliveryService = {
     return apiClient.put('/products/deliveries/update-sold/', data);
   },
 
-  getDeliveryExpenses: async (deliveryId: number) => {
-    return apiClient.get('/products/delivery-expenses/', { delivery: deliveryId });
+  getDeliveryExpenses: async (deliveryId: number, filters: any = {}) => {
+    return apiClient.get('/products/delivery-expenses/', { delivery: deliveryId, ...filters });
   },
 
   createDeliveryExpense: async (data: {
@@ -689,5 +823,189 @@ export const deliveryService = {
   // Add a method to get settlement history for a salesman
   getSettlementHistory: async (salesmanId: number) => {
     return apiClient.get('/products/delivery-settlements/', { salesman: salesmanId });
+  },
+
+  // Get salesman balance summary (uses the enhanced pending returns endpoint)
+  getSalesmanBalanceSummary: async (): Promise<{
+    pending_returns: {
+      total_pending: number;
+      total_quantity: number;
+      by_reason: Record<string, { count: number; quantity: number }>;
+      by_salesman: Array<{
+        salesman_id: number;
+        salesman_name: string;
+        pending_count: number;
+        pending_quantity: number;
+      }>;
+    };
+    salesman_balances: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      current_balance: number;
+      total_cash_collected: number;
+      total_cash_settled: number;
+      net_cash_position: number;
+      last_settlement_date: string | null;
+      pending_deliveries_value: number;
+      outstanding_invoices_value: number;
+    }>;
+  }> => {
+    return apiClient.get('/products/returns/pending_summary/');
+  },
+
+  // Mark cash as collected from salesman
+  collectCashFromSalesman: async (data: {
+    salesman_id: number;
+    transaction_ids: number[];
+    collected_amount: number;
+    notes?: string;
+  }): Promise<{
+    message: string;
+    salesman_name: string;
+    collected_amount: number;
+    transactions_updated: number;
+    new_salesman_balance: number;
+    total_cash_settled: number;
+    collection_date: string;
+  }> => {
+    return apiClient.post('/products/deliveries/collect-cash/', data);
+  },
+
+  getDeliverySettlementSummary: async (deliveryId: number): Promise<{
+    delivery_id: number;
+    delivery_number: string;
+    salesman_name: string;
+    settlement_summary: {
+      delivery_metrics: {
+        delivery_value: number;
+        delivery_date: string;
+        delivery_status: string;
+        total_items: number;
+      };
+      cash_flow: {
+        total_cash_collected: number;
+        cash_to_settle_to_owner: number;
+        outstanding_from_customers: number;
+        collection_rate_percentage: number;
+      };
+      product_tracking: {
+        product_value_in_circulation: number;
+        circulation_percentage: number;
+        conversion_rate: number;
+      };
+      invoice_breakdown: {
+        total_invoices: number;
+        total_invoice_amount: number;
+        paid_invoices: number;
+        pending_invoices: number;
+        partial_invoices: number;
+      };
+      daily_settlements: Array<{
+        date: string;
+        cash_collected: number;
+        invoice_count: number;
+        settlement_due: number;
+      }>;
+      payment_methods: Array<{
+        method: string;
+        amount: number;
+        transaction_count: number;
+        percentage: number;
+      }>;
+    };
+  }> => {
+    return apiClient.get(`/products/deliveries/${deliveryId}/settlement_summary/`);
+  },
+
+  collectPhysicalCash: async (data: {
+    settlement_id: number;
+    amount_collected: number;
+    collection_method: 'full_amount' | 'partial_amount' | 'excess_returned';
+    collection_notes?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    settlement_id: number;
+    amount_collected: number;
+    salesman_name: string;
+    new_balance: number;
+    collection_date: string;
+    next_delivery_ready: boolean;
+    collection_method: string;
+    audit_trail: {
+      collected_by: string;
+      collection_notes: string;
+      transaction_created: boolean;
+    };
+  }> => {
+    return apiClient.post('/products/deliveries/collect_physical_cash/', data);
+  },
+};
+
+
+
+// Cash Flow Management Services
+export const cashFlowService = {
+  getSalesmanCashSummary: async (salesmanId: number, days: number = 30): Promise<{
+    total_collections: number;
+    total_settlements: number;
+    total_expenses: number;
+    current_balance: number;
+    net_cash_position: number;
+    transaction_count: number;
+    period_days: number;
+  }> => {
+    return apiClient.get(`/auth/salesmen/${salesmanId}/cash-summary/?days=${days}`);
+  },
+
+  recordCashCollection: async (data: {
+    invoice_id: number;
+    amount: number;
+    notes?: string;
+  }): Promise<{
+    message: string;
+    transaction_id: number;
+    new_balance: number;
+  }> => {
+    return apiClient.post('/auth/cash-collection/', data);
+  },
+
+  getCashTransactionHistory: async (salesmanId: number, limit: number = 50): Promise<Array<{
+    id: number;
+    transaction_type: string;
+    transaction_type_display: string;
+    amount: number;
+    balance_before: number;
+    balance_after: number;
+    description: string;
+    notes: string | null;
+    reference_type: string | null;
+    reference_id: string | null;
+    invoice_number: string | null;
+    created_at: string;
+    created_by: string | null;
+  }>> => {
+    return apiClient.get(`/auth/salesmen/${salesmanId}/cash-transactions/?limit=${limit}`);
+  },
+
+  getSettlementCashFlow: async (salesmanId: number): Promise<{
+    total_collections: number;
+    total_expenses: number;
+    net_cash_available: number;
+    current_balance: number;
+    last_settlement_date: string | null;
+  }> => {
+    return apiClient.get(`/auth/salesmen/${salesmanId}/settlement-cash-flow/`);
+  },
+
+  recordAdvancePayment: async (salesmanId: number, data: {
+    amount: number;
+    notes?: string;
+  }): Promise<{
+    message: string;
+    transaction_id: number;
+    new_balance: number;
+  }> => {
+    return apiClient.post(`/auth/salesmen/${salesmanId}/advance-payment/`, data);
   },
 };

@@ -50,11 +50,43 @@ class Salesman(models.Model):
     description = models.TextField(blank=True, null=True)
     profit_margin = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)  # Percentage
     is_active = models.BooleanField(default=True)
+    
+    # New balance tracking fields
+    current_balance = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Current cash balance with salesman (positive = salesman owes owner, negative = owner owes salesman)"
+    )
+    total_cash_collected = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Total cash collected by salesman from customers"
+    )
+    total_cash_settled = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Total cash settled with owner"
+    )
+    last_settlement_date = models.DateTimeField(null=True, blank=True)
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
         return f"{self.name} - {self.owner.business_name}"
+    
+    @property
+    def outstanding_balance(self):
+        """Calculate outstanding balance (positive = salesman owes owner)"""
+        return self.current_balance
+    
+    @property
+    def net_cash_position(self):
+        """Calculate net cash position"""
+        return self.total_cash_collected - self.total_cash_settled
     
     class Meta:
         db_table = 'salesmen'
@@ -93,6 +125,86 @@ class Shop(models.Model):
     
     class Meta:
         db_table = 'shops'
+
+
+class SalesmanCashCollection(models.Model):
+    """Track physical cash collections from salesmen to owners"""
+    COLLECTION_METHODS = [
+        ('physical_handover', 'Physical Handover'),
+        ('bank_deposit', 'Bank Deposit'),
+        ('digital_transfer', 'Digital Transfer'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='cash_collections')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    collection_date = models.DateField()
+    collection_method = models.CharField(max_length=20, choices=COLLECTION_METHODS, default='physical_handover')
+    reference_number = models.CharField(max_length=100, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    
+    # Balance tracking
+    salesman_balance_before = models.DecimalField(max_digits=10, decimal_places=2)
+    salesman_balance_after = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    # Audit fields
+    collected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='cash_collections_made')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'salesman_cash_collections'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"Cash Collection: {self.salesman.name} - LKR {self.amount} on {self.collection_date}"
+
+
+class SalesmanCashTransaction(models.Model):
+    """Track all cash transactions between salesman and owner"""
+    
+    TRANSACTION_TYPES = [
+        ('collection', 'Cash Collection from Customer'),
+        ('settlement', 'Settlement with Owner'),
+        ('expense', 'Delivery Expense'),
+        ('advance', 'Advance from Owner'),
+        ('adjustment', 'Balance Adjustment'),
+    ]
+    
+    salesman = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='cash_transactions')
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    balance_before = models.DecimalField(max_digits=12, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=12, decimal_places=2)
+    
+    # Reference information
+    reference_type = models.CharField(max_length=50, null=True, blank=True)  # 'invoice', 'delivery_settlement', 'expense'
+    reference_id = models.CharField(max_length=100, null=True, blank=True)
+    invoice = models.ForeignKey('sales.Invoice', on_delete=models.CASCADE, null=True, blank=True, related_name='salesman_cash_transactions')
+    cash_collection = models.ForeignKey(SalesmanCashCollection, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
+    
+    description = models.TextField()
+    notes = models.TextField(blank=True, null=True)
+    
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.salesman.name} - {self.get_transaction_type_display()} - {self.amount}"
+    
+    class Meta:
+        db_table = 'salesman_cash_transactions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['salesman', 'transaction_type']),
+            models.Index(fields=['salesman', 'created_at']),
+        ]
 
 
 class MarginPolicy(models.Model):

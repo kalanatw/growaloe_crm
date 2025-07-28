@@ -415,6 +415,25 @@ class Transaction(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     
+    # Cash collection tracking
+    cash_collected = models.BooleanField(
+        default=False,
+        help_text="Whether the owner has physically collected this cash from the salesman"
+    )
+    cash_collected_date = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When the owner collected the cash from salesman"
+    )
+    cash_collected_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='cash_collections',
+        help_text="Owner who collected the cash"
+    )
+    
     def __str__(self):
         return f"{self.get_payment_method_display()} - {self.amount} - {self.invoice.invoice_number}"
     
@@ -561,6 +580,25 @@ class InvoiceSettlement(models.Model):
     notes = models.TextField(blank=True, null=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Cash collection tracking
+    cash_collected = models.BooleanField(
+        default=False,
+        help_text="Whether the owner has physically collected this cash from the salesman"
+    )
+    cash_collected_date = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When the owner collected the cash from salesman"
+    )
+    cash_collected_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='invoice_cash_collections',
+        help_text="Owner who collected the cash"
+    )
     
     def __str__(self):
         return f"Settlement for {self.invoice.invoice_number} - {self.total_amount}"

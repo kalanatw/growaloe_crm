@@ -27,5 +27,7 @@ urlpatterns = [
     path('deliveries/by-salesman/', salesman_views.DeliveryBySalesmanView.as_view(), name='deliveries-by-salesman'),
     path('deliveries/salesman/<int:salesman_id>/details/', salesman_views.SalesmanDeliveryDetailView.as_view(), name='salesman-delivery-details'),
     path('deliveries/settle/<int:salesman_id>/', salesman_views.SettleSalesmanDeliveryView.as_view(), name='settle-salesman-delivery'),
+    path('deliveries/settlement-preview/<int:salesman_id>/', salesman_views.DeliverySettlementPreviewView.as_view(), name='delivery-settlement-preview'),
+    path('deliveries/collect-cash/', salesman_views.CollectCashFromSalesmanView.as_view(), name='collect-cash-from-salesman'),
     path('deliveries/update-sold/', salesman_views.UpdateSoldQuantitiesView.as_view(), name='update-sold-quantities'),
 ]

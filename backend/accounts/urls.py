@@ -18,6 +18,13 @@ urlpatterns = [
     path('profile/', views.ProfileView.as_view(), name='profile'),
     path('change-password/', views.ChangePasswordView.as_view(), name='change_password'),
     
+    # Cash flow management endpoints
+    path('salesmen/<int:salesman_id>/cash-summary/', views.salesman_cash_summary, name='salesman_cash_summary'),
+    path('salesmen/<int:salesman_id>/cash-transactions/', views.cash_transaction_history, name='cash_transaction_history'),
+    path('salesmen/<int:salesman_id>/settlement-cash-flow/', views.settlement_cash_flow, name='settlement_cash_flow'),
+    path('salesmen/<int:salesman_id>/advance-payment/', views.record_advance_payment, name='record_advance_payment'),
+    path('cash-collection/', views.record_cash_collection, name='record_cash_collection'),
+    
     # Router URLs
     path('', include(router.urls)),
 ]

@@ -441,74 +441,101 @@ class Delivery(models.Model):
             'settlement_priority': 'high' if total_outstanding_value > 1000 else 'medium' if total_outstanding_value > 500 else 'low'
         }
     
-    def settle_delivery(self, settlement_data, settlement_notes=""):
+    def settle_delivery(self, settlement_data, settlement_notes="", settled_by=None):
         """Settle the delivery by processing returned stock through batch assignments batch-wise"""
         if self.status != 'delivered':
             raise ValueError("Only delivered deliveries can be settled")
         
-        total_margin_earned = 0
+        from django.db import transaction
         
-        for item_data in settlement_data:
-            delivery_item = self.items.get(id=item_data['delivery_item_id'])
-            remaining_qty = item_data['remaining_quantity']
+        with transaction.atomic():
+            total_margin_earned = 0
             
-            # Process returns through batch assignments (batch-wise)
-            if remaining_qty > 0:
-                # Find batch assignments for this delivery and product
-                assignments = BatchAssignment.objects.filter(
-                    delivery=self,
-                    batch__product=delivery_item.product,
-                    salesman=self.salesman,
-                    status__in=['delivered', 'partial']
-                ).order_by('created_at')
+            for item_data in settlement_data:
+                delivery_item = self.items.get(id=item_data['delivery_item_id'])
+                remaining_qty = item_data['remaining_quantity']
                 
-                # Return stock by updating assignment returned_quantity
-                remaining_to_return = remaining_qty
-                for assignment in assignments:
-                    if remaining_to_return <= 0:
-                        break
+                # Process returns through batch assignments (batch-wise)
+                if remaining_qty > 0:
+                    # Find batch assignments for this delivery and product
+                    assignments = BatchAssignment.objects.filter(
+                        delivery=self,
+                        batch__product=delivery_item.product,
+                        salesman=self.salesman,
+                        status__in=['delivered', 'partial']
+                    ).order_by('created_at')
                     
-                    outstanding = assignment.outstanding_quantity
-                    if outstanding > 0:
-                        return_qty = min(outstanding, remaining_to_return)
-                        assignment.returned_quantity += return_qty
+                    # Return stock by updating assignment returned_quantity
+                    remaining_to_return = remaining_qty
+                    for assignment in assignments:
+                        if remaining_to_return <= 0:
+                            break
                         
-                        # Update assignment status
-                        if assignment.returned_quantity >= assignment.delivered_quantity:
-                            assignment.status = 'returned'
-                        elif assignment.returned_quantity > 0:
-                            assignment.status = 'partial'
-                        
-                        assignment.save()
-                        
-                        # Create batch transaction for return
-                        BatchTransaction.objects.create(
-                            batch=assignment.batch,
-                            transaction_type='return',
-                            quantity=return_qty,
-                            balance_after=assignment.batch.current_quantity,
-                            reference_type='delivery_settlement',
-                            reference_id=self.id,
-                            notes=f"Settlement return from {self.salesman.user.get_full_name()} (Delivery: {self.delivery_number})",
-                            created_by=self.created_by
-                        )
-                        
-                        remaining_to_return -= return_qty
+                        outstanding = assignment.outstanding_quantity
+                        if outstanding > 0:
+                            return_qty = min(outstanding, remaining_to_return)
+                            assignment.returned_quantity += return_qty
+                            
+                            # Update assignment status
+                            if assignment.returned_quantity >= assignment.delivered_quantity:
+                                assignment.status = 'returned'
+                            elif assignment.returned_quantity > 0:
+                                assignment.status = 'partial'
+                            
+                            assignment.save()
+                            
+                            # Create batch transaction for return
+                            BatchTransaction.objects.create(
+                                batch=assignment.batch,
+                                transaction_type='return',
+                                quantity=return_qty,
+                                balance_after=assignment.batch.current_quantity,
+                                reference_type='delivery_settlement',
+                                reference_id=self.id,
+                                notes=f"Settlement return from {self.salesman.user.get_full_name()} (Delivery: {self.delivery_number})",
+                                created_by=self.created_by
+                            )
+                            
+                            remaining_to_return -= return_qty
+                
+                total_margin_earned += item_data['margin_earned']
             
-            total_margin_earned += item_data['margin_earned']
-        
-        # Update delivery status and settlement info
-        self.status = 'settled'
-        self.settlement_date = timezone.now().date()
-        self.total_margin_earned = total_margin_earned
-        self.settlement_notes = settlement_notes
-        self.save()
-        
-        return {
-            'total_margin_earned': float(total_margin_earned),
-            'settlement_date': self.settlement_date.isoformat(),
-            'status': self.status
-        }
+            # Handle delivery expenses settlement
+            unsettled_expenses = self.expenses.filter(is_settled=False)
+            total_expense_amount = 0
+            
+            if unsettled_expenses.exists():
+                # Calculate total expense amount
+                total_expense_amount = unsettled_expenses.aggregate(
+                    total=models.Sum('amount')
+                )['total'] or 0
+                
+                # Mark all expenses as settled
+                unsettled_expenses.update(
+                    is_settled=True,
+                    settled_at=timezone.now(),
+                    settled_by=settled_by
+                )
+                
+                # Reduce salesman's current balance by expense amount
+                # (expenses reduce the salesman's balance)
+                self.salesman.current_balance -= total_expense_amount
+                self.salesman.save()
+            
+            # Update delivery status and settlement info
+            self.status = 'settled'
+            self.settlement_date = timezone.now().date()
+            self.total_margin_earned = total_margin_earned
+            self.settlement_notes = settlement_notes
+            self.save()
+            
+            return {
+                'total_margin_earned': float(total_margin_earned),
+                'total_expenses_settled': float(total_expense_amount),
+                'settlement_date': self.settlement_date.isoformat(),
+                'status': self.status,
+                'salesman_balance_after_settlement': float(self.salesman.current_balance)
+            }
     
     class Meta:
         db_table = 'deliveries'
@@ -1082,6 +1109,35 @@ class DeliverySettlement(models.Model):
     total_returned_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_margin_earned = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     
+    # Cash flow tracking fields
+    total_cash_collected = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Total cash collected by salesman during delivery period"
+    )
+    cash_settled_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Amount of cash settled with owner"
+    )
+    cash_balance_adjustment = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Balance adjustment (positive = salesman keeps, negative = salesman owes)"
+    )
+    settlement_method = models.CharField(
+        max_length=20,
+        choices=[
+            ('full_cash', 'Full Cash Settlement'),
+            ('partial_cash', 'Partial Cash Settlement'),
+            ('balance_carry', 'Carry Balance Forward'),
+        ],
+        default='full_cash'
+    )
+    
     # Item counts
     total_delivered_items = models.PositiveIntegerField(default=0)
     total_sold_items = models.PositiveIntegerField(default=0)
@@ -1096,6 +1152,36 @@ class DeliverySettlement(models.Model):
     
     settlement_notes = models.TextField(blank=True, null=True)
     settled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='settlements_processed')
+    
+    # Physical cash collection tracking
+    physical_cash_collected = models.BooleanField(
+        default=False,
+        help_text="Whether owner has physically collected cash from salesman"
+    )
+    physical_cash_collected_date = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When owner physically collected the cash"
+    )
+    physical_cash_collected_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='physical_cash_collections',
+        help_text="Owner who physically collected the cash"
+    )
+    physical_cash_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Actual amount of cash physically collected"
+    )
+    cash_collection_notes = models.TextField(
+        blank=True, 
+        null=True,
+        help_text="Notes about the physical cash collection"
+    )
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1137,6 +1223,49 @@ class DeliverySettlement(models.Model):
         if self.total_delivered_value > 0:
             return round((self.total_sold_value / self.total_delivered_value) * 100, 1)
         return 0
+    
+    def collect_physical_cash(self, collected_by, amount_collected, notes=''):
+        """Mark cash as physically collected and reset salesman balance"""
+        from django.db import transaction
+        from accounts.models import SalesmanCashTransaction
+        
+        if self.physical_cash_collected:
+            raise ValueError("Cash has already been physically collected for this settlement")
+        
+        with transaction.atomic():
+            # Update settlement record
+            self.physical_cash_collected = True
+            self.physical_cash_collected_date = timezone.now()
+            self.physical_cash_collected_by = collected_by
+            self.physical_cash_amount = amount_collected
+            self.cash_collection_notes = notes
+            self.save()
+            
+            # Create cash settlement transaction (negative to reduce balance)
+            SalesmanCashTransaction.objects.create(
+                salesman=self.salesman,
+                transaction_type='settlement',
+                amount=-amount_collected,
+                balance_before=self.salesman.current_balance,
+                balance_after=self.salesman.current_balance - amount_collected,
+                reference_type='physical_cash_collection',
+                reference_id=str(self.id),
+                notes=f"Physical cash collection by {collected_by.get_full_name()}. {notes}",
+                created_by=collected_by
+            )
+            
+            # Update salesman balances
+            self.salesman.current_balance -= amount_collected
+            self.salesman.total_cash_settled += amount_collected
+            self.salesman.last_settlement_date = timezone.now()
+            self.salesman.save()
+            
+            return {
+                'settlement_id': self.id,
+                'amount_collected': amount_collected,
+                'new_balance': self.salesman.current_balance,
+                'collection_date': self.physical_cash_collected_date
+            }
 
 
 class DeliverySettlementItem(models.Model):
@@ -1194,11 +1323,16 @@ class DeliveryExpense(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     ref_id = models.CharField(max_length=64, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    is_settled = models.BooleanField(default=False)
+    settled_at = models.DateTimeField(null=True, blank=True)
+    settled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='settled_expenses')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'delivery_expenses'
         ordering = ['-created_at']
+
+
 
     def __str__(self):
         return f"{self.delivery} - {self.category}: {self.amount}"

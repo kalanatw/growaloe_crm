@@ -178,8 +178,8 @@ export const ReturnsManagementPage: React.FC = () => {
                   <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                     Pending Returns
                   </p>
-                  <p className={`${getCardAmountClass(summary.total_pending)} text-gray-900 dark:text-white`}>
-                    {summary.total_pending}
+                  <p className={`${getCardAmountClass(summary.pending_returns.total_pending)} text-gray-900 dark:text-white`}>
+                    {summary.pending_returns.total_pending}
                   </p>
                 </div>
               </div>
@@ -194,8 +194,8 @@ export const ReturnsManagementPage: React.FC = () => {
                   <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                     Pending Quantity
                   </p>
-                  <p className={`${getCardAmountClass(summary.total_quantity)} text-gray-900 dark:text-white`}>
-                    {summary.total_quantity}
+                  <p className={`${getCardAmountClass(summary.pending_returns.total_quantity)} text-gray-900 dark:text-white`}>
+                    {summary.pending_returns.total_quantity}
                   </p>
                 </div>
               </div>
@@ -210,8 +210,8 @@ export const ReturnsManagementPage: React.FC = () => {
                   <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                     Unsold Returns
                   </p>
-                  <p className={`${getCardAmountClass(summary.by_reason.unsold?.count || 0)} text-gray-900 dark:text-white`}>
-                    {summary.by_reason.unsold?.count || 0}
+                  <p className={`${getCardAmountClass(summary.pending_returns.by_reason.unsold?.count || 0)} text-gray-900 dark:text-white`}>
+                    {summary.pending_returns.by_reason.unsold?.count || 0}
                   </p>
                 </div>
               </div>
@@ -226,8 +226,8 @@ export const ReturnsManagementPage: React.FC = () => {
                   <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
                     Damaged Returns
                   </p>
-                  <p className={`${getCardAmountClass(summary.by_reason.damaged?.count || 0)} text-gray-900 dark:text-white`}>
-                    {summary.by_reason.damaged?.count || 0}
+                  <p className={`${getCardAmountClass(summary.pending_returns.by_reason.damaged?.count || 0)} text-gray-900 dark:text-white`}>
+                    {summary.pending_returns.by_reason.damaged?.count || 0}
                   </p>
                 </div>
               </div>

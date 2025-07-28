@@ -13,10 +13,11 @@ from django.db import models, transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import datetime, timedelta
+from decimal import Decimal
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse
 import logging
 
-from .models import Delivery, DeliveryItem, BatchAssignment, Product, Batch, DeliverySettlement, DeliverySettlementItem
+from .models import Delivery, DeliveryItem, BatchAssignment, Product, Batch, DeliverySettlement, DeliverySettlementItem, DeliveryExpense
 from .serializers import (
     DeliverySerializer, DeliverySettlementSerializer, DeliverySettlementItemSerializer,
     SalesmanStockOverviewSerializer, SalesmanSettlementQueueSerializer, 
@@ -734,7 +735,19 @@ class SettleSalesmanDeliveryView(APIView):
         settlement_notes = serializer.validated_data.get('settlement_notes', '')
         return_all_stock = serializer.validated_data.get('return_all_stock', True)
         create_settlement_record = serializer.validated_data.get('create_settlement_record', True)
+        cash_settlement_amount = Decimal(str(serializer.validated_data.get('cash_settlement_amount', 0.00)))
+        settlement_method = serializer.validated_data.get('settlement_method', 'full_cash')
         settlement_date = timezone.now().date()
+        
+        # Import the balance service
+        from accounts.services import SalesmanBalanceService
+        
+        # Calculate cash flow and validate settlement amount
+        cash_flow = SalesmanBalanceService.calculate_settlement_cash_flow(salesman)
+        is_valid, validation_message = SalesmanBalanceService.validate_settlement_amount(salesman, cash_settlement_amount)
+        
+        if not is_valid:
+            return Response({'error': validation_message}, status=status.HTTP_400_BAD_REQUEST)
         
         with transaction.atomic():
             settlement_data = {
@@ -809,6 +822,16 @@ class SettleSalesmanDeliveryView(APIView):
             # Convert dict to list
             settlement_data['settlement_items'] = list(settlement_items_dict.values())
             
+            # Perform cash settlement if amount > 0
+            cash_transaction = None
+            if cash_settlement_amount > 0:
+                cash_transaction = SalesmanBalanceService.settle_salesman_cash(
+                    salesman=salesman,
+                    settlement_amount=cash_settlement_amount,
+                    settlement_notes=settlement_notes,
+                    created_by=request.user
+                )
+            
             # Create settlement record if requested
             settlement_record = None
             if create_settlement_record:
@@ -822,6 +845,11 @@ class SettleSalesmanDeliveryView(APIView):
                     total_delivered_items=settlement_data['total_delivered_items'],
                     total_sold_items=settlement_data['total_sold_items'],
                     total_returned_items=settlement_data['total_returned_items'],
+                    # Cash flow fields
+                    total_cash_collected=Decimal(str(cash_flow['total_collections'])),
+                    cash_settled_amount=cash_settlement_amount,
+                    cash_balance_adjustment=Decimal(str(cash_flow['net_cash_available'])) - cash_settlement_amount,
+                    settlement_method=settlement_method,
                     status='completed',
                     settlement_notes=settlement_notes,
                     settled_by=request.user
@@ -860,6 +888,9 @@ class SettleSalesmanDeliveryView(APIView):
             'salesman_name': salesman.user.get_full_name(),
             'settlement_date': settlement_date,
             'settled_deliveries': settled_deliveries,
+            'cash_flow': cash_flow,
+            'cash_settlement_amount': float(cash_settlement_amount),
+            'remaining_balance': float(salesman.current_balance),
             'summary': {
                 'total_delivered_items': settlement_data['total_delivered_items'],
                 'total_sold_items': settlement_data['total_sold_items'],
@@ -875,6 +906,232 @@ class SettleSalesmanDeliveryView(APIView):
             response_data['settlement_record'] = DeliverySettlementSerializer(settlement_record).data
         
         return Response(response_data)
+
+
+class DeliverySettlementPreviewView(APIView):
+    """
+    GET /api/products/deliveries/settlement-preview/{salesman_id}/
+    Get structured settlement preview data for the new step-by-step modal.
+    """
+    permission_classes = [IsOwnerOrDeveloper]
+    
+    @extend_schema(
+        summary="Get delivery settlement preview",
+        description="Get structured settlement data for step-by-step settlement modal",
+        responses={200: OpenApiResponse(description="Settlement preview data")}
+    )
+    def get(self, request, salesman_id):
+        try:
+            salesman = Salesman.objects.get(id=salesman_id)
+        except Salesman.DoesNotExist:
+            return Response(
+                {'error': 'Salesman not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check permission for owner
+        if request.user.role == 'owner' and salesman.owner != request.user.owner_profile:
+            return Response(
+                {'error': 'Permission denied'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Get outstanding batch assignments for this salesman
+        outstanding_assignments = BatchAssignment.objects.filter(
+            salesman=salesman,
+            status__in=['delivered', 'partial']
+        ).select_related('batch', 'batch__product', 'delivery')
+        
+        if not outstanding_assignments.exists():
+            return Response({
+                'message': 'No outstanding deliveries found for settlement',
+                'delivery': None,
+                'products': [],
+                'cash_breakdown': {
+                    'invoice_collections': 0,
+                    'delivery_expenses': 0,
+                    'return_value': 0,
+                    'net_cash_available': 0,
+                    'payment_methods': []
+                },
+                'salesman_balance': {
+                    'current_balance': float(salesman.current_balance),
+                    'balance_after_settlement': float(salesman.current_balance)
+                }
+            })
+        
+        # Get the most recent delivery for header info
+        latest_delivery = outstanding_assignments.first().delivery
+        
+        # Use the new settlement service for accurate cash flow calculation
+        from .services import DeliverySettlementService
+        
+        # Get product summary using the service
+        products_data = DeliverySettlementService.get_salesman_product_summary(salesman)
+        
+        # Get accurate cash flow calculation based on actual invoice settlements
+        cash_flow = DeliverySettlementService.calculate_delivery_cash_flow(salesman)
+        
+        # Calculate balance after settlement
+        balance_after_settlement = float(salesman.current_balance) + cash_flow['net_cash_available']
+        
+        response_data = {
+            'delivery': {
+                'id': latest_delivery.id if latest_delivery else 0,
+                'delivery_number': latest_delivery.delivery_number if latest_delivery else 'Multiple',
+                'salesman_name': salesman.user.get_full_name(),
+                'delivery_date': latest_delivery.delivery_date.isoformat() if latest_delivery else None
+            },
+            'products': products_data,
+            'cash_breakdown': {
+                'invoice_collections': cash_flow['actual_collections'],
+                'delivery_expenses': -abs(cash_flow['delivery_expenses']),  # Negative value
+                'return_value': cash_flow['return_value'],
+                'net_cash_available': cash_flow['net_cash_available'],
+                'payment_methods': cash_flow['payment_methods']
+            },
+            'salesman_balance': {
+                'current_balance': float(salesman.current_balance),
+                'balance_after_settlement': balance_after_settlement
+            },
+            'debug_info': {
+                'invoice_count': cash_flow['invoice_count'],
+                'transaction_count': cash_flow['transaction_count']
+            }
+        }
+        
+        return Response(response_data)
+
+
+class CollectCashFromSalesmanView(APIView):
+    """
+    POST /api/products/deliveries/collect-cash/
+    Mark transactions as cash collected when owner physically collects money from salesman.
+    """
+    permission_classes = [IsOwnerOrDeveloper]
+    
+    @extend_schema(
+        summary="Mark cash as collected from salesman",
+        description="Update transaction records to mark cash as physically collected by owner",
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'salesman_id': {'type': 'integer'},
+                    'transaction_ids': {
+                        'type': 'array',
+                        'items': {'type': 'integer'}
+                    },
+                    'collected_amount': {'type': 'number'},
+                    'notes': {'type': 'string'}
+                },
+                'required': ['salesman_id', 'transaction_ids', 'collected_amount']
+            }
+        },
+        responses={200: OpenApiResponse(description="Cash collection recorded successfully")}
+    )
+    def post(self, request):
+        try:
+            salesman_id = request.data.get('salesman_id')
+            transaction_ids = request.data.get('transaction_ids', [])
+            collected_amount = request.data.get('collected_amount', 0)
+            notes = request.data.get('notes', '')
+            
+            if not salesman_id or not transaction_ids:
+                return Response(
+                    {'error': 'salesman_id and transaction_ids are required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            try:
+                salesman = Salesman.objects.get(id=salesman_id)
+            except Salesman.DoesNotExist:
+                return Response(
+                    {'error': 'Salesman not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check permission for owner
+            if request.user.role == 'owner' and salesman.owner != request.user.owner_profile:
+                return Response(
+                    {'error': 'Permission denied'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            with transaction.atomic():
+                # Get settlements to mark as collected
+                from sales.models import InvoiceSettlement
+                settlements_to_collect = InvoiceSettlement.objects.filter(
+                    id__in=transaction_ids,  # Note: keeping parameter name for API compatibility
+                    invoice__salesman=salesman,
+                    cash_collected=False
+                )
+                
+                if not settlements_to_collect.exists():
+                    return Response(
+                        {'error': 'No valid uncollected settlements found'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Calculate total amount of selected settlements
+                total_settlement_amount = settlements_to_collect.aggregate(
+                    total=Sum('total_amount')
+                )['total'] or 0
+                
+                # Validate collected amount
+                if abs(float(collected_amount) - float(total_settlement_amount)) > 0.01:
+                    return Response(
+                        {'error': f'Collected amount ({collected_amount}) does not match settlement total ({total_settlement_amount})'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Mark settlements as collected
+                updated_count = settlements_to_collect.update(
+                    cash_collected=True,
+                    cash_collected_date=timezone.now(),
+                    cash_collected_by=request.user
+                )
+                
+                # Update salesman balance (reduce current balance since owner collected the cash)
+                salesman.current_balance -= Decimal(str(collected_amount))
+                salesman.total_cash_settled += Decimal(str(collected_amount))
+                salesman.last_settlement_date = timezone.now()
+                salesman.save()
+                
+                # Create cash transaction record for the settlement
+                from accounts.models import SalesmanCashTransaction
+                SalesmanCashTransaction.objects.create(
+                    salesman=salesman,
+                    transaction_type='settlement',
+                    amount=-Decimal(str(collected_amount)),  # Negative because cash is leaving salesman
+                    balance_before=salesman.current_balance + Decimal(str(collected_amount)),
+                    balance_after=salesman.current_balance,
+                    reference_type='cash_collection',
+                    reference_id=','.join(map(str, transaction_ids)),
+                    description=f'Owner collected cash from {updated_count} transactions',
+                    notes=notes,
+                    created_by=request.user
+                )
+                
+                logger.info(f"Cash collection recorded: Owner {request.user.get_full_name()} collected "
+                           f"LKR {collected_amount} from salesman {salesman.user.get_full_name()}")
+                
+                return Response({
+                    'message': 'Cash collection recorded successfully',
+                    'salesman_name': salesman.user.get_full_name(),
+                    'collected_amount': float(collected_amount),
+                    'transactions_updated': updated_count,
+                    'new_salesman_balance': float(salesman.current_balance),
+                    'total_cash_settled': float(salesman.total_cash_settled),
+                    'collection_date': timezone.now().isoformat()
+                })
+                
+        except Exception as e:
+            logger.error(f"Error recording cash collection: {str(e)}")
+            return Response(
+                {'error': 'Failed to record cash collection'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class UpdateSoldQuantitiesView(APIView):

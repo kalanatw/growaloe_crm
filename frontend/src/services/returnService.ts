@@ -27,14 +27,27 @@ export interface CreateProductReturn {
 }
 
 export interface PendingReturnsSummary {
-  total_pending: number;
-  total_quantity: number;
-  by_reason: Record<string, { count: number; quantity: number }>;
-  by_salesman: Array<{
+  pending_returns: {
+    total_pending: number;
+    total_quantity: number;
+    by_reason: Record<string, { count: number; quantity: number }>;
+    by_salesman: Array<{
+      salesman_id: number;
+      salesman_name: string;
+      pending_count: number;
+      pending_quantity: number;
+    }>;
+  };
+  salesman_balances: Array<{
     salesman_id: number;
     salesman_name: string;
-    pending_count: number;
-    pending_quantity: number;
+    current_balance: number;
+    total_cash_collected: number;
+    total_cash_settled: number;
+    net_cash_position: number;
+    last_settlement_date: string | null;
+    pending_deliveries_value: number;
+    outstanding_invoices_value: number;
   }>;
 }
 

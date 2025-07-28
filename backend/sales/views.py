@@ -1052,21 +1052,27 @@ class TransactionViewSet(viewsets.ModelViewSet):
         # Store previous balance for response
         previous_balance = invoice.balance_due
         
-        # Create transaction
-        transaction = Transaction.objects.create(
-            invoice=invoice,
-            amount=amount,
-            payment_method=payment_method,
-            reference_number=reference_number,
-            notes=notes,
-            created_by=request.user
-        )
+        with transaction.atomic():
+            # Create transaction
+            transaction_record = Transaction.objects.create(
+                invoice=invoice,
+                amount=amount,
+                payment_method=payment_method,
+                reference_number=reference_number,
+                notes=notes,
+                created_by=request.user
+            )
+            
+            # Transaction save method will update invoice automatically
+            invoice.refresh_from_db()
+            
+            # Salesman balance will be updated automatically by Django signals
+            salesman_balance_updated = bool(invoice.salesman)
+            if salesman_balance_updated:
+                logger.info(f"Invoice settlement will trigger automatic salesman balance update via signals for {invoice.salesman.user.get_full_name()}")
         
-        # Transaction save method will update invoice automatically
-        invoice.refresh_from_db()
-        
-        return Response({
-            'transaction_id': transaction.id,
+        response_data = {
+            'transaction_id': transaction_record.id,
             'invoice': {
                 'id': invoice.id,
                 'invoice_number': invoice.invoice_number,
@@ -1076,7 +1082,19 @@ class TransactionViewSet(viewsets.ModelViewSet):
                 'status': invoice.status
             },
             'message': 'Invoice settled successfully'
-        }, status=status.HTTP_201_CREATED)
+        }
+        
+        # Add salesman balance info if updated
+        if salesman_balance_updated:
+            response_data['salesman_balance'] = {
+                'salesman_id': invoice.salesman.id,
+                'salesman_name': invoice.salesman.user.get_full_name(),
+                'cash_collected': float(amount),
+                'new_balance': float(invoice.salesman.current_balance),
+                'total_cash_collected': float(invoice.salesman.total_cash_collected)
+            }
+        
+        return Response(response_data, status=status.HTTP_201_CREATED)
     
     @extend_schema(
         summary="Settle invoice with multiple payment methods",

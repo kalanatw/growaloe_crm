@@ -1,5 +1,5 @@
 from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -10,7 +10,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
 
-from .models import User, Owner, Salesman, Shop, MarginPolicy
+from .models import User, Owner, Salesman, Shop, MarginPolicy, SalesmanCashTransaction
 from .serializers import (
     UserSerializer, UserProfileSerializer, ChangePasswordSerializer,
     RegisterSerializer, OwnerSerializer, SalesmanSerializer, CreateSalesmanSerializer,
@@ -18,6 +18,8 @@ from .serializers import (
     SalesmanSummarySerializer
 )
 from .permissions import IsOwnerOrReadOnly, IsSalesmanOrReadOnly
+from .services import SalesmanBalanceService
+from sales.models import Invoice
 
 
 @extend_schema_view(
@@ -352,6 +354,149 @@ class SalesmanViewSet(viewsets.ModelViewSet):
         except Owner.DoesNotExist:
             raise ValidationError("Owner profile not found for the authenticated user")
     
+    @action(detail=True, methods=['post'], url_path='collect-cash')
+    def collect_cash(self, request, pk=None):
+        """Record physical cash collection from salesman"""
+        from django.db import transaction
+        from .serializers import SalesmanCashCollectionSerializer
+        from .models import SalesmanCashTransaction
+        
+        salesman = self.get_object()
+        
+        # Only owners can collect cash from their salesmen
+        if request.user.role != 'owner':
+            return Response(
+                {'error': 'Only owners can collect cash from salesmen'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Verify the salesman belongs to this owner
+        try:
+            owner = request.user.owner_profile
+            if salesman.owner != owner:
+                return Response(
+                    {'error': 'You can only collect cash from your own salesmen'}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        except:
+            return Response(
+                {'error': 'Owner profile not found'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        serializer = SalesmanCashCollectionSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            amount = serializer.validated_data['amount']
+            
+            # Check if salesman has sufficient balance
+            if salesman.current_balance < amount:
+                return Response(
+                    {
+                        'error': f'Insufficient balance. Salesman has LKR {salesman.current_balance}, but trying to collect LKR {amount}',
+                        'current_balance': float(salesman.current_balance),
+                        'requested_amount': float(amount)
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            with transaction.atomic():
+                # Calculate the balance after collection
+                balance_before = salesman.current_balance
+                balance_after = balance_before - amount
+                
+                # Record cash collection with all balance fields
+                collection = serializer.save(
+                    salesman=salesman,
+                    collected_by=request.user,
+                    salesman_balance_before=balance_before,
+                    salesman_balance_after=balance_after
+                )
+                
+                # Update salesman balance (reduce by collected amount)
+                salesman.current_balance = balance_after
+                salesman.save()
+                
+                # Create cash transaction record
+                SalesmanCashTransaction.objects.create(
+                    salesman=salesman,
+                    transaction_type='settlement',
+                    amount=-collection.amount,
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    description=f'Cash collected by {request.user.get_full_name()}',
+                    reference_id=collection.reference_number,
+                    cash_collection=collection,
+                    created_by=request.user
+                )
+                
+                return Response({
+                    'collection': SalesmanCashCollectionSerializer(collection).data,
+                    'salesman_balance_after': float(salesman.current_balance),
+                    'message': f'Cash collection recorded. Salesman balance updated to LKR {salesman.current_balance}'
+                }, status=status.HTTP_201_CREATED)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=True, methods=['get'], url_path='cash-collections')
+    def cash_collections(self, request, pk=None):
+        """Get cash collection history for salesman"""
+        from .serializers import SalesmanCashCollectionSerializer
+        
+        salesman = self.get_object()
+        collections = salesman.cash_collections.all()
+        serializer = SalesmanCashCollectionSerializer(collections, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'], url_path='outstanding-cash')
+    def outstanding_cash(self, request, pk=None):
+        """Get outstanding cash summary for salesman"""
+        from django.db.models import Sum
+        from .serializers import OutstandingCashSummarySerializer
+        
+        salesman = self.get_object()
+        
+        # Calculate cash from invoices (paid invoices)
+        from sales.models import Invoice
+        invoices = Invoice.objects.filter(
+            salesman=salesman,
+            status__in=['paid', 'partial']
+        )
+        
+        total_cash_from_invoices = sum(float(invoice.paid_amount or 0) for invoice in invoices)
+        total_cash_collected = float(salesman.cash_collections.aggregate(
+            total=Sum('amount')
+        )['total'] or 0)
+        
+        outstanding_cash = total_cash_from_invoices - total_cash_collected
+        
+        summary_data = {
+            'salesman_id': salesman.id,
+            'salesman_name': salesman.user.get_full_name(),
+            'current_balance': float(salesman.current_balance),
+            'total_cash_from_invoices': total_cash_from_invoices,
+            'total_cash_collected_by_owner': total_cash_collected,
+            'outstanding_cash_with_salesman': outstanding_cash,
+            'last_collection_date': salesman.cash_collections.first().collection_date if salesman.cash_collections.exists() else None
+        }
+        
+        serializer = OutstandingCashSummarySerializer(summary_data)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'], url_path='cash-transactions')
+    def cash_transactions(self, request, pk=None):
+        """Get cash transaction history for salesman (bank book view)"""
+        from .models import SalesmanCashTransaction
+        from .serializers import SalesmanCashTransactionSerializer
+        
+        salesman = self.get_object()
+        transactions = SalesmanCashTransaction.objects.filter(
+            salesman=salesman
+        ).select_related('invoice', 'cash_collection', 'created_by').order_by('-created_at')
+        
+        serializer = SalesmanCashTransactionSerializer(transactions, many=True)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['get'])
     def summary(self, request):
         """Get salesmen summary for current owner"""
@@ -645,3 +790,330 @@ class MarginPolicyViewSet(viewsets.ModelViewSet):
             queryset = queryset.none()
         
         return queryset
+
+
+# Cash Flow Management API Endpoints
+
+@extend_schema(
+    summary="Get salesman cash summary",
+    description="Get cash flow summary for a specific salesman",
+    parameters=[
+        OpenApiParameter(
+            name='days',
+            description='Number of days to include in summary (default: 30)',
+            required=False,
+            type=int
+        )
+    ],
+    responses={
+        200: OpenApiResponse(
+            description="Cash flow summary",
+            examples=[
+                OpenApiExample(
+                    'Cash Summary',
+                    value={
+                        'total_collections': 5000.00,
+                        'total_settlements': 4500.00,
+                        'total_expenses': 200.00,
+                        'current_balance': 300.00,
+                        'net_cash_position': 500.00,
+                        'transaction_count': 15,
+                        'period_days': 30
+                    }
+                )
+            ]
+        ),
+        404: OpenApiResponse(description="Salesman not found")
+    },
+    tags=['Cash Flow Management']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def salesman_cash_summary(request, salesman_id):
+    """Get salesman cash flow summary"""
+    try:
+        salesman = Salesman.objects.get(id=salesman_id)
+        
+        # Check permission
+        if request.user.role == 'owner' and salesman.owner != request.user.owner_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'salesman' and salesman != request.user.salesman_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        days = int(request.GET.get('days', 30))
+        summary = SalesmanBalanceService.get_salesman_cash_summary(salesman, days)
+        
+        return Response(summary)
+    except Salesman.DoesNotExist:
+        return Response({'error': 'Salesman not found'}, status=status.HTTP_404_NOT_FOUND)
+    except ValueError:
+        return Response({'error': 'Invalid days parameter'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Record cash collection",
+    description="Record cash collection from invoice settlement",
+    request={
+        'application/json': {
+            'type': 'object',
+            'properties': {
+                'invoice_id': {'type': 'integer', 'description': 'Invoice ID'},
+                'amount': {'type': 'number', 'description': 'Collection amount'},
+                'notes': {'type': 'string', 'description': 'Collection notes'}
+            },
+            'required': ['invoice_id', 'amount']
+        }
+    },
+    responses={
+        200: OpenApiResponse(
+            description="Cash collection recorded successfully",
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        'message': 'Cash collection recorded successfully',
+                        'transaction_id': 123,
+                        'new_balance': 1500.00
+                    }
+                )
+            ]
+        ),
+        400: OpenApiResponse(description="Invalid data provided")
+    },
+    tags=['Cash Flow Management']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def record_cash_collection(request):
+    """Record cash collection from invoice settlement"""
+    try:
+        invoice_id = request.data.get('invoice_id')
+        amount = request.data.get('amount')
+        notes = request.data.get('notes', '')
+        
+        if not invoice_id or not amount:
+            return Response({'error': 'invoice_id and amount are required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        invoice = Invoice.objects.get(id=invoice_id)
+        
+        # Check permission
+        if request.user.role == 'owner' and invoice.salesman.owner != request.user.owner_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'salesman' and invoice.salesman != request.user.salesman_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        cash_transaction = SalesmanBalanceService.record_cash_collection(
+            salesman=invoice.salesman,
+            invoice=invoice,
+            amount=amount,
+            notes=notes,
+            created_by=request.user
+        )
+        
+        return Response({
+            'message': 'Cash collection recorded successfully',
+            'transaction_id': cash_transaction.id,
+            'new_balance': float(invoice.salesman.current_balance)
+        })
+        
+    except Invoice.DoesNotExist:
+        return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Get cash transaction history",
+    description="Get recent cash transaction history for a salesman",
+    parameters=[
+        OpenApiParameter(
+            name='limit',
+            description='Number of transactions to return (default: 50)',
+            required=False,
+            type=int
+        )
+    ],
+    responses={
+        200: OpenApiResponse(
+            description="Transaction history",
+            examples=[
+                OpenApiExample(
+                    'Transaction History',
+                    value=[
+                        {
+                            'id': 1,
+                            'transaction_type': 'collection',
+                            'amount': 500.00,
+                            'balance_before': 1000.00,
+                            'balance_after': 1500.00,
+                            'description': 'Cash collection from Shop ABC - Invoice INV202501001',
+                            'created_at': '2025-01-15T10:30:00Z'
+                        }
+                    ]
+                )
+            ]
+        ),
+        404: OpenApiResponse(description="Salesman not found")
+    },
+    tags=['Cash Flow Management']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def cash_transaction_history(request, salesman_id):
+    """Get cash transaction history for salesman"""
+    try:
+        salesman = Salesman.objects.get(id=salesman_id)
+        
+        # Check permission
+        if request.user.role == 'owner' and salesman.owner != request.user.owner_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'salesman' and salesman != request.user.salesman_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        limit = int(request.GET.get('limit', 50))
+        transactions = SalesmanBalanceService.get_cash_transaction_history(salesman, limit)
+        
+        transaction_data = []
+        for transaction in transactions:
+            transaction_data.append({
+                'id': transaction.id,
+                'transaction_type': transaction.transaction_type,
+                'transaction_type_display': transaction.get_transaction_type_display(),
+                'amount': float(transaction.amount),
+                'balance_before': float(transaction.balance_before),
+                'balance_after': float(transaction.balance_after),
+                'description': transaction.description,
+                'notes': transaction.notes,
+                'reference_type': transaction.reference_type,
+                'reference_id': transaction.reference_id,
+                'invoice_number': transaction.invoice.invoice_number if transaction.invoice else None,
+                'created_at': transaction.created_at.isoformat(),
+                'created_by': transaction.created_by.get_full_name() if transaction.created_by else None
+            })
+        
+        return Response(transaction_data)
+        
+    except Salesman.DoesNotExist:
+        return Response({'error': 'Salesman not found'}, status=status.HTTP_404_NOT_FOUND)
+    except ValueError:
+        return Response({'error': 'Invalid limit parameter'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Calculate settlement cash flow",
+    description="Calculate available cash flow for settlement",
+    responses={
+        200: OpenApiResponse(
+            description="Settlement cash flow data",
+            examples=[
+                OpenApiExample(
+                    'Cash Flow Data',
+                    value={
+                        'total_collections': 5000.00,
+                        'total_expenses': 200.00,
+                        'net_cash_available': 4800.00,
+                        'current_balance': 1200.00,
+                        'last_settlement_date': '2025-01-10T15:30:00Z'
+                    }
+                )
+            ]
+        ),
+        404: OpenApiResponse(description="Salesman not found")
+    },
+    tags=['Cash Flow Management']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def settlement_cash_flow(request, salesman_id):
+    """Calculate settlement cash flow for salesman"""
+    try:
+        salesman = Salesman.objects.get(id=salesman_id)
+        
+        # Check permission
+        if request.user.role == 'owner' and salesman.owner != request.user.owner_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'salesman' and salesman != request.user.salesman_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        cash_flow = SalesmanBalanceService.calculate_settlement_cash_flow(salesman)
+        
+        # Convert Decimal to float for JSON serialization
+        response_data = {
+            'total_collections': float(cash_flow['total_collections']),
+            'total_expenses': float(cash_flow['total_expenses']),
+            'net_cash_available': float(cash_flow['net_cash_available']),
+            'current_balance': float(cash_flow['current_balance']),
+            'last_settlement_date': cash_flow['last_settlement_date'].isoformat() if cash_flow['last_settlement_date'] else None
+        }
+        
+        return Response(response_data)
+        
+    except Salesman.DoesNotExist:
+        return Response({'error': 'Salesman not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@extend_schema(
+    summary="Record advance payment",
+    description="Record advance payment from owner to salesman",
+    request={
+        'application/json': {
+            'type': 'object',
+            'properties': {
+                'amount': {'type': 'number', 'description': 'Advance amount'},
+                'notes': {'type': 'string', 'description': 'Advance notes'}
+            },
+            'required': ['amount']
+        }
+    },
+    responses={
+        200: OpenApiResponse(
+            description="Advance payment recorded successfully",
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        'message': 'Advance payment recorded successfully',
+                        'transaction_id': 124,
+                        'new_balance': 800.00
+                    }
+                )
+            ]
+        ),
+        400: OpenApiResponse(description="Invalid data provided")
+    },
+    tags=['Cash Flow Management']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def record_advance_payment(request, salesman_id):
+    """Record advance payment from owner to salesman"""
+    try:
+        salesman = Salesman.objects.get(id=salesman_id)
+        
+        # Only owners can give advances
+        if request.user.role != 'owner' or salesman.owner != request.user.owner_profile:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        amount = request.data.get('amount')
+        notes = request.data.get('notes', '')
+        
+        if not amount or float(amount) <= 0:
+            return Response({'error': 'Valid amount is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        cash_transaction = SalesmanBalanceService.record_advance_payment(
+            salesman=salesman,
+            amount=amount,
+            notes=notes,
+            created_by=request.user
+        )
+        
+        return Response({
+            'message': 'Advance payment recorded successfully',
+            'transaction_id': cash_transaction.id,
+            'new_balance': float(salesman.current_balance)
+        })
+        
+    except Salesman.DoesNotExist:
+        return Response({'error': 'Salesman not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

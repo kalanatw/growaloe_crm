@@ -1851,7 +1851,7 @@ class DeliveryViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            result = delivery.settle_delivery(settlement_items, settlement_notes)
+            result = delivery.settle_delivery(settlement_items, settlement_notes, settled_by=request.user)
             return Response({
                 **result,
                 'message': 'Delivery settled successfully'
@@ -1864,6 +1864,670 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response(
                 {'error': f'Settlement failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Get delivery settlement preview for salesman",
+        description="Get comprehensive settlement preview including cash flow for a salesman's deliveries",
+        responses={
+            200: OpenApiResponse(
+                description="Settlement preview data",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Preview",
+                        value={
+                            "delivery": {
+                                "id": 1,
+                                "delivery_number": "DEL-20250619-001",
+                                "salesman_name": "John Doe",
+                                "delivery_date": "2025-06-19"
+                            },
+                            "products": [
+                                {
+                                    "product_name": "Aloe Vera Gel",
+                                    "delivered_quantity": 100,
+                                    "sold_quantity": 75,
+                                    "returned_quantity": 5,
+                                    "outstanding_quantity": 20,
+                                    "unit_price": 25.00,
+                                    "delivered_value": 2500.00,
+                                    "sold_value": 1875.00,
+                                    "outstanding_value": 500.00
+                                }
+                            ],
+                            "cash_breakdown": {
+                                "invoice_collections": 1875.00,
+                                "delivery_expenses": 100.00,
+                                "return_value": 125.00,
+                                "net_cash_available": 1900.00,
+                                "payment_methods": [
+                                    {
+                                        "method": "cash",
+                                        "amount": 1500.00
+                                    },
+                                    {
+                                        "method": "cheque",
+                                        "amount": 375.00,
+                                        "reference": "CHQ001",
+                                        "bank": "Commercial Bank"
+                                    }
+                                ]
+                            },
+                            "salesman_balance": {
+                                "current_balance": 500.00,
+                                "balance_after_settlement": -1400.00
+                            }
+                        }
+                    )
+                ]
+            ),
+            404: OpenApiResponse(description="Salesman not found")
+        }
+    )
+    @action(detail=False, methods=['get'])
+    def settlement_preview(self, request):
+        """Get settlement preview for a salesman"""
+        salesman_id = request.query_params.get('salesman_id')
+        if not salesman_id:
+            return Response(
+                {'error': 'salesman_id parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from accounts.models import Salesman
+            from sales.models import Invoice, InvoiceItem, Transaction
+            from decimal import Decimal
+            
+            salesman = Salesman.objects.get(id=salesman_id)
+            
+            # Get the most recent active delivery for this salesman
+            recent_delivery = Delivery.objects.filter(
+                salesman=salesman,
+                status__in=['delivered', 'pending']
+            ).order_by('-created_at').first()
+            
+            if not recent_delivery:
+                return Response(
+                    {'error': 'No active deliveries found for this salesman'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get product settlement data
+            products_data = []
+            for item in recent_delivery.items.all():
+                # Get sold quantity from invoices since delivery
+                sold_qty = InvoiceItem.objects.filter(
+                    invoice__salesman=salesman,
+                    product=item.product,
+                    invoice__invoice_date__gte=recent_delivery.created_at,
+                    invoice__status__in=['paid', 'partial', 'pending']
+                ).aggregate(total=models.Sum('quantity'))['total'] or 0
+                
+                # Get returned quantity from batch assignments
+                returned_qty = BatchAssignment.objects.filter(
+                    salesman=salesman,
+                    batch__product=item.product,
+                    created_at__gte=recent_delivery.created_at
+                ).aggregate(total=models.Sum('returned_quantity'))['total'] or 0
+                
+                outstanding_qty = item.quantity - sold_qty - returned_qty
+                
+                products_data.append({
+                    'product_name': item.product.name,
+                    'delivered_quantity': item.quantity,
+                    'sold_quantity': sold_qty,
+                    'returned_quantity': returned_qty,
+                    'outstanding_quantity': max(0, outstanding_qty),
+                    'unit_price': float(item.unit_price),
+                    'delivered_value': float(item.total_value),
+                    'sold_value': float(sold_qty * item.unit_price),
+                    'outstanding_value': float(max(0, outstanding_qty) * item.unit_price)
+                })
+            
+            # Get cash breakdown
+            # Invoice collections since delivery
+            invoice_collections = Transaction.objects.filter(
+                invoice__salesman=salesman,
+                invoice__invoice_date__gte=recent_delivery.created_at,
+                transaction_date__gte=recent_delivery.created_at
+            ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+            
+            # Delivery expenses (only unsettled ones)
+            delivery_expenses = recent_delivery.expenses.filter(
+                is_settled=False
+            ).aggregate(
+                total=models.Sum('amount')
+            )['total'] or Decimal('0.00')
+            
+            # Return value (products returned)
+            return_value = sum(p['returned_quantity'] * p['unit_price'] for p in products_data)
+            
+            # Net cash available
+            net_cash_available = float(invoice_collections) - float(delivery_expenses) + return_value
+            
+            # Get payment methods breakdown
+            payment_methods = []
+            transactions = Transaction.objects.filter(
+                invoice__salesman=salesman,
+                invoice__invoice_date__gte=recent_delivery.created_at,
+                transaction_date__gte=recent_delivery.created_at
+            ).values('payment_method').annotate(
+                total_amount=models.Sum('amount')
+            )
+            
+            for transaction in transactions:
+                payment_methods.append({
+                    'method': transaction['payment_method'],
+                    'amount': float(transaction['total_amount'])
+                })
+            
+            # Salesman balance
+            current_balance = float(salesman.current_balance)
+            balance_after_settlement = current_balance - net_cash_available
+            
+            return Response({
+                'delivery': {
+                    'id': recent_delivery.id,
+                    'delivery_number': recent_delivery.delivery_number,
+                    'salesman_name': salesman.user.get_full_name(),
+                    'delivery_date': recent_delivery.delivery_date.isoformat()
+                },
+                'products': products_data,
+                'cash_breakdown': {
+                    'invoice_collections': float(invoice_collections),
+                    'delivery_expenses': float(delivery_expenses),
+                    'return_value': return_value,
+                    'net_cash_available': net_cash_available,
+                    'payment_methods': payment_methods
+                },
+                'salesman_balance': {
+                    'current_balance': current_balance,
+                    'balance_after_settlement': balance_after_settlement
+                }
+            })
+            
+        except Salesman.DoesNotExist:
+            return Response(
+                {'error': 'Salesman not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get settlement preview: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Process delivery settlement with cash management",
+        description="Complete delivery settlement including cash collection and balance updates",
+        request={
+            "type": "object",
+            "properties": {
+                "salesman_id": {"type": "integer", "description": "ID of the salesman"},
+                "settlement_notes": {"type": "string", "description": "Notes for the settlement"},
+                "cash_settlement_amount": {"type": "number", "description": "Amount of cash collected"},
+                "settlement_method": {
+                    "type": "string", 
+                    "enum": ["full_cash", "partial_cash", "balance_carry"],
+                    "description": "Settlement method"
+                },
+                "return_all_stock": {"type": "boolean", "description": "Whether to return all remaining stock"},
+                "create_settlement_record": {"type": "boolean", "description": "Whether to create settlement record"}
+            },
+            "required": ["salesman_id", "cash_settlement_amount", "settlement_method"]
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Settlement processed successfully",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Result",
+                        value={
+                            "success": True,
+                            "message": "Settlement completed successfully",
+                            "settlement_id": 123,
+                            "cash_collected": 1500.00,
+                            "new_balance": -1000.00,
+                            "delivery_status": "settled"
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Invalid settlement data"),
+            404: OpenApiResponse(description="Salesman or delivery not found")
+        }
+    )
+    @action(detail=False, methods=['post'])
+    def process_settlement(self, request):
+        """Process complete delivery settlement with cash management"""
+        try:
+            from accounts.models import Salesman
+            from accounts.services import SalesmanBalanceService
+            from decimal import Decimal
+            
+            salesman_id = request.data.get('salesman_id')
+            settlement_notes = request.data.get('settlement_notes', '')
+            cash_settlement_amount = Decimal(str(request.data.get('cash_settlement_amount', 0)))
+            settlement_method = request.data.get('settlement_method', 'full_cash')
+            return_all_stock = request.data.get('return_all_stock', True)
+            create_settlement_record = request.data.get('create_settlement_record', True)
+            
+            if not salesman_id:
+                return Response(
+                    {'error': 'salesman_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            salesman = Salesman.objects.get(id=salesman_id)
+            
+            # Get the most recent active delivery
+            delivery = Delivery.objects.filter(
+                salesman=salesman,
+                status__in=['delivered', 'pending']
+            ).order_by('-created_at').first()
+            
+            if not delivery:
+                return Response(
+                    {'error': 'No active delivery found for settlement'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            with transaction.atomic():
+                # 1. Record cash collection if amount > 0
+                cash_transaction = None
+                if cash_settlement_amount > 0:
+                    cash_transaction = SalesmanBalanceService.record_cash_settlement(
+                        salesman=salesman,
+                        amount=cash_settlement_amount,
+                        settlement_method=settlement_method,
+                        notes=settlement_notes,
+                        reference_type='delivery_settlement',
+                        reference_id=delivery.id,
+                        created_by=request.user
+                    )
+                
+                # 2. Handle stock returns if requested
+                if return_all_stock:
+                    for item in delivery.items.all():
+                        # Get outstanding quantity for this product
+                        assignments = BatchAssignment.objects.filter(
+                            salesman=salesman,
+                            batch__product=item.product,
+                            status__in=['delivered', 'partial']
+                        )
+                        
+                        for assignment in assignments:
+                            if assignment.outstanding_quantity > 0:
+                                # Return remaining stock
+                                assignment.returned_quantity += assignment.outstanding_quantity
+                                assignment.status = 'returned'
+                                assignment.save()
+                
+                # 3. Mark all unsettled expenses for this delivery as settled
+                from products.models import DeliveryExpense
+                unsettled_expenses = DeliveryExpense.objects.filter(
+                    delivery=delivery,
+                    is_settled=False
+                )
+                
+                expense_count = unsettled_expenses.count()
+                if expense_count > 0:
+                    unsettled_expenses.update(
+                        is_settled=True,
+                        settled_at=timezone.now(),
+                        settled_by=request.user
+                    )
+                    print(f"Marked {expense_count} expenses as settled for delivery {delivery.delivery_number}")
+                
+                # 4. Create settlement record if requested
+                settlement_record = None
+                if create_settlement_record:
+                    from products.models import DeliverySettlement
+                    settlement_record = DeliverySettlement.objects.create(
+                        salesman=salesman,
+                        settlement_date=timezone.now().date(),
+                        total_delivered_value=delivery.total_value,
+                        total_sold_value=0,  # Calculate based on invoices
+                        total_returned_value=0,  # Calculate based on returns
+                        status='completed',
+                        settlement_notes=settlement_notes,
+                        settled_by=request.user
+                    )
+                
+                # 5. Update delivery status
+                delivery.status = 'settled'
+                delivery.settlement_date = timezone.now().date()
+                delivery.settlement_notes = settlement_notes
+                delivery.save()
+                
+                # 6. Refresh salesman balance
+                salesman.refresh_from_db()
+                
+                return Response({
+                    'success': True,
+                    'message': 'Settlement completed successfully',
+                    'settlement_id': settlement_record.id if settlement_record else None,
+                    'cash_transaction_id': cash_transaction.id if cash_transaction else None,
+                    'cash_collected': float(cash_settlement_amount),
+                    'new_balance': float(salesman.current_balance),
+                    'delivery_status': delivery.status,
+                    'delivery_id': delivery.id
+                })
+                
+        except Salesman.DoesNotExist:
+            return Response(
+                {'error': 'Salesman not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Settlement failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Get detailed invoice settlement breakdown for delivery",
+        description="Get comprehensive invoice settlement breakdown showing payment methods, collection rates, and recent transactions",
+        responses={
+            200: OpenApiResponse(
+                description="Detailed settlement breakdown",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Breakdown",
+                        value={
+                            "delivery_info": {
+                                "id": 1,
+                                "delivery_number": "DEL-20250619-001",
+                                "salesman_name": "John Doe",
+                                "delivery_date": "2025-06-19",
+                                "total_value": 5000.00
+                            },
+                            "settlement_summary": {
+                                "total_invoice_amount": 4500.00,
+                                "total_collected": 3200.00,
+                                "outstanding_balance": 1300.00,
+                                "collection_rate": 71.11,
+                                "invoice_count": 8
+                            },
+                            "payment_methods": [
+                                {
+                                    "method": "cash",
+                                    "total_amount": 2000.00,
+                                    "transaction_count": 5,
+                                    "settlement_count": 2,
+                                    "percentage": 62.5
+                                },
+                                {
+                                    "method": "cheque",
+                                    "total_amount": 800.00,
+                                    "transaction_count": 2,
+                                    "settlement_count": 1,
+                                    "percentage": 25.0
+                                },
+                                {
+                                    "method": "bank_transfer",
+                                    "total_amount": 400.00,
+                                    "transaction_count": 1,
+                                    "settlement_count": 0,
+                                    "percentage": 12.5
+                                }
+                            ],
+                            "recent_settlements": [
+                                {
+                                    "type": "transaction",
+                                    "id": 123,
+                                    "date": "2025-06-20T10:30:00Z",
+                                    "amount": 500.00,
+                                    "payment_method": "cash",
+                                    "invoice_number": "INV-001",
+                                    "shop_name": "ABC Store",
+                                    "reference": None,
+                                    "notes": "Cash payment"
+                                }
+                            ]
+                        }
+                    )
+                ]
+            ),
+            404: OpenApiResponse(description="Delivery not found")
+        }
+    )
+    @action(detail=True, methods=['get'])
+    def settlement_breakdown(self, request, pk=None):
+        """Get detailed invoice settlement breakdown for a specific delivery"""
+        try:
+            delivery = self.get_object()
+            
+            # Get the settlement breakdown from the serializer method
+            serializer = self.get_serializer(delivery)
+            settlement_data = serializer.get_settlement_breakdown(delivery)
+            
+            # Add delivery info
+            response_data = {
+                'delivery_info': {
+                    'id': delivery.id,
+                    'delivery_number': delivery.delivery_number,
+                    'salesman_name': delivery.salesman.user.get_full_name(),
+                    'delivery_date': delivery.delivery_date.isoformat(),
+                    'total_value': float(delivery.total_value),
+                    'status': delivery.status
+                },
+                'settlement_summary': settlement_data['summary'],
+                'payment_methods': [
+                    {
+                        **pm,
+                        'percentage': (pm['total_amount'] / settlement_data['summary']['total_collected'] * 100) if settlement_data['summary']['total_collected'] > 0 else 0
+                    }
+                    for pm in settlement_data['payment_methods']
+                ],
+                'recent_settlements': settlement_data['recent_settlements']
+            }
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get settlement breakdown: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Get delivery settlement summary",
+        description="Get comprehensive settlement summary for owner cash flow tracking",
+        responses={
+            200: OpenApiResponse(
+                description="Settlement summary with cash flow metrics",
+                examples=[
+                    OpenApiExample(
+                        "Settlement Summary",
+                        value={
+                            "delivery_id": 1,
+                            "delivery_number": "DEL-20250725-001",
+                            "salesman_name": "John Doe",
+                            "settlement_summary": {
+                                "delivery_metrics": {
+                                    "delivery_value": 170000.00,
+                                    "delivery_date": "2025-07-25",
+                                    "delivery_status": "delivered",
+                                    "total_items": 3
+                                },
+                                "cash_flow": {
+                                    "total_cash_collected": 71000.00,
+                                    "cash_to_settle_to_owner": 71000.00,
+                                    "outstanding_from_customers": 8000.00,
+                                    "collection_rate_percentage": 41.76
+                                },
+                                "product_tracking": {
+                                    "product_value_in_circulation": 99000.00,
+                                    "circulation_percentage": 58.24,
+                                    "conversion_rate": 41.76
+                                }
+                            }
+                        }
+                    )
+                ]
+            )
+        }
+    )
+    @action(detail=True, methods=['get'])
+    def settlement_summary(self, request, pk=None):
+        """
+        Get comprehensive settlement summary for delivery.
+        
+        This endpoint provides owners with detailed cash flow analysis,
+        product value tracking, and settlement obligations.
+        """
+        try:
+            delivery = self.get_object()
+            serializer = self.get_serializer(delivery)
+            settlement_data = serializer.get_settlement_summary(delivery)
+            
+            return Response({
+                'delivery_id': delivery.id,
+                'delivery_number': delivery.delivery_number,
+                'salesman_name': delivery.salesman.user.get_full_name(),
+                'settlement_summary': settlement_data
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to get settlement summary: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Collect physical cash from salesman",
+        description="Owner physically collects cash from salesman and resets balance",
+        request={
+            "type": "object",
+            "properties": {
+                "settlement_id": {"type": "integer", "description": "Delivery settlement ID"},
+                "amount_collected": {"type": "number", "description": "Amount of cash physically collected"},
+                "collection_notes": {"type": "string", "description": "Notes about cash collection"},
+                "collection_method": {
+                    "type": "string",
+                    "enum": ["full_amount", "partial_amount", "excess_returned"],
+                    "description": "How the cash was collected"
+                }
+            },
+            "required": ["settlement_id", "amount_collected"]
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Cash collected successfully",
+                examples=[
+                    OpenApiExample(
+                        "Cash Collection Result",
+                        value={
+                            "success": True,
+                            "message": "Cash collected successfully",
+                            "settlement_id": 41,
+                            "amount_collected": 19800.00,
+                            "salesman_name": "Roshan Padukka",
+                            "new_balance": 0.00,
+                            "collection_date": "2025-07-27T16:30:00Z",
+                            "next_delivery_ready": True
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Invalid collection data or cash already collected"),
+            404: OpenApiResponse(description="Settlement not found")
+        }
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def collect_physical_cash(self, request):
+        """
+        Owner physically collects cash from salesman after delivery settlement.
+        This resets the salesman's cash balance and creates audit trail.
+        """
+        from decimal import Decimal
+        from products.models import DeliverySettlement, BatchAssignment
+        
+        try:
+            settlement_id = request.data.get('settlement_id')
+            amount_collected = Decimal(str(request.data.get('amount_collected', 0)))
+            collection_notes = request.data.get('collection_notes', '')
+            collection_method = request.data.get('collection_method', 'full_amount')
+            
+            if not settlement_id:
+                return Response(
+                    {'error': 'settlement_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if amount_collected <= 0:
+                return Response(
+                    {'error': 'amount_collected must be greater than 0'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get settlement record
+            try:
+                settlement = DeliverySettlement.objects.get(id=settlement_id)
+            except DeliverySettlement.DoesNotExist:
+                return Response(
+                    {'error': 'Settlement not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check if owner has permission for this salesman
+            if request.user.role == 'owner' and settlement.salesman.owner != request.user.owner_profile:
+                return Response(
+                    {'error': 'Permission denied'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Validate amount against salesman's current balance
+            if amount_collected > settlement.salesman.current_balance:
+                return Response(
+                    {'error': f'Amount collected ({amount_collected}) exceeds salesman balance ({settlement.salesman.current_balance})'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Collect the cash
+            result = settlement.collect_physical_cash(
+                collected_by=request.user,
+                amount_collected=amount_collected,
+                notes=f"{collection_method}: {collection_notes}"
+            )
+            
+            # Check if salesman is ready for next delivery
+            next_delivery_ready = (
+                settlement.salesman.current_balance == 0 and
+                not BatchAssignment.objects.filter(
+                    salesman=settlement.salesman,
+                    status__in=['delivered', 'partial']
+                ).exists()
+            )
+            
+            return Response({
+                'success': True,
+                'message': f'Cash collected successfully from {settlement.salesman.user.get_full_name()}',
+                'settlement_id': settlement.id,
+                'amount_collected': float(amount_collected),
+                'salesman_name': settlement.salesman.user.get_full_name(),
+                'new_balance': float(settlement.salesman.current_balance),
+                'collection_date': result['collection_date'].isoformat(),
+                'collection_method': collection_method,
+                'next_delivery_ready': next_delivery_ready,
+                'audit_trail': {
+                    'collected_by': request.user.get_full_name(),
+                    'collection_notes': collection_notes,
+                    'transaction_created': True
+                }
+            })
+            
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Cash collection failed: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -2974,7 +3638,7 @@ class DeliveryExpenseViewSet(viewsets.ModelViewSet):
     queryset = DeliveryExpense.objects.all()
     serializer_class = DeliveryExpenseSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['delivery', 'category']
+    filterset_fields = ['delivery', 'category', 'is_settled']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -2982,6 +3646,118 @@ class DeliveryExpenseViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
+    
+    def get_queryset(self):
+        queryset = DeliveryExpense.objects.select_related('delivery__salesman', 'settled_by')
+        delivery_id = self.request.query_params.get('delivery', None)
+        if delivery_id is not None:
+            queryset = queryset.filter(delivery=delivery_id)
+        return queryset.order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        """
+        Create expense - balance will be updated when delivery is settled
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expense = serializer.save()
+        
+        print(f"Created expense {expense.id} for LKR {expense.amount}")
+        print(f"Expense will be settled when delivery {expense.delivery.delivery_number} is settled")
+        
+        # Return expense data
+        headers = self.get_success_headers(serializer.data)
+        return Response({
+            'expense': serializer.data,
+            'message': f'Expense created. Will be settled when delivery is settled.'
+        }, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        """
+        Update expense - balance will be updated when delivery is settled
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        old_amount = instance.amount
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        expense = serializer.save()
+        
+        print(f"Updated expense {expense.id} from LKR {old_amount} to LKR {expense.amount}")
+        print(f"Balance will be adjusted when delivery {expense.delivery.delivery_number} is settled")
+        
+        return Response({
+            'expense': serializer.data,
+            'message': f'Expense updated. Will be settled when delivery is settled.'
+        })
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Delete expense and restore salesman balance - return updated balance
+        """
+        instance = self.get_object()
+        expense_amount = instance.amount
+        
+        with transaction.atomic():
+            # Restore salesman balance - add back expense amount
+            salesman = instance.delivery.salesman
+            salesman.current_balance += expense_amount
+            salesman.save()
+            
+            print(f"Deleted expense {instance.id} for LKR {expense_amount}")
+            print(f"Updated salesman {salesman.name} balance: LKR {salesman.current_balance}")
+            
+            instance.delete()
+            
+            return Response({
+                'salesman_balance': float(salesman.current_balance),
+                'message': f'Expense deleted. Salesman balance updated to LKR {salesman.current_balance}'
+            }, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['post'], url_path='mark-settled')
+    def mark_settled(self, request, pk=None):
+        """
+        Mark an expense as settled - Only available for individual expense settlement
+        Note: Expenses are automatically settled when the delivery is settled
+        """
+        expense = self.get_object()
+        
+        if expense.is_settled:
+            return Response(
+                {'error': 'Expense is already settled'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if delivery is already settled
+        if expense.delivery.status == 'settled':
+            return Response(
+                {'error': 'Cannot settle individual expenses for a settled delivery'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Only owners can mark expenses as settled
+        if not hasattr(request.user, 'owner_profile'):
+            return Response(
+                {'error': 'Only owners can mark expenses as settled'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        with transaction.atomic():
+            expense.is_settled = True
+            expense.settled_at = timezone.now()
+            expense.settled_by = request.user
+            expense.save()
+            
+            # Reduce salesman balance when expense is settled individually
+            # (This is already done during creation, but we ensure consistency)
+            # No additional balance adjustment needed since expense amount was already deducted during creation
+        
+        serializer = self.get_serializer(expense)
+        return Response({
+            'message': 'Expense marked as settled',
+            'expense': serializer.data
+        })
 
 
 
@@ -3258,7 +4034,7 @@ class ProductReturnViewSet(viewsets.ModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def pending_summary(self, request):
-        """Get summary of pending returns"""
+        """Get summary of pending returns and salesman balances"""
         try:
             # Filter by user permissions
             queryset = self.get_queryset().filter(status='pending')
@@ -3298,11 +4074,62 @@ class ProductReturnViewSet(viewsets.ModelViewSet):
                     'pending_quantity': item['quantity']
                 })
             
+            # Get salesman balance summary
+            from accounts.models import Salesman
+            from sales.models import Invoice
+            from decimal import Decimal
+            
+            salesman_balances = []
+            
+            # Get all salesmen for the current owner
+            if request.user.role == 'owner':
+                try:
+                    owner = request.user.owner_profile
+                    salesmen = Salesman.objects.filter(owner=owner, is_active=True)
+                except:
+                    salesmen = Salesman.objects.none()
+            elif request.user.role == 'developer':
+                salesmen = Salesman.objects.filter(is_active=True)
+            else:
+                salesmen = Salesman.objects.none()
+            
+            for salesman in salesmen:
+                # Calculate pending deliveries value (outstanding batch assignments)
+                pending_deliveries_value = BatchAssignment.objects.filter(
+                    salesman=salesman,
+                    status__in=['delivered', 'partial']
+                ).aggregate(
+                    total=Sum(F('delivered_quantity') - F('returned_quantity'), output_field=models.DecimalField())
+                )['total'] or Decimal('0.00')
+                
+                # Calculate outstanding invoices value for this salesman
+                outstanding_invoices_value = Invoice.objects.filter(
+                    salesman=salesman,
+                    status__in=['pending', 'partial']
+                ).aggregate(
+                    total=Sum('balance_due')
+                )['total'] or Decimal('0.00')
+                
+                salesman_balances.append({
+                    'salesman_id': salesman.id,
+                    'salesman_name': salesman.user.get_full_name(),
+                    'current_balance': float(salesman.current_balance),
+                    'total_cash_collected': float(salesman.total_cash_collected),
+                    'total_cash_settled': float(salesman.total_cash_settled),
+                    'net_cash_position': float(salesman.net_cash_position),
+                    'last_settlement_date': salesman.last_settlement_date.isoformat() if salesman.last_settlement_date else None,
+                    'pending_deliveries_value': float(pending_deliveries_value),
+                    'outstanding_invoices_value': float(outstanding_invoices_value)
+                })
+            
             return Response({
-                'total_pending': total_pending,
-                'total_quantity': total_quantity,
-                'by_reason': by_reason,
-                'by_salesman': by_salesman
+                'pending_returns': {
+                    'total_pending': total_pending,
+                    'total_quantity': total_quantity,
+                    'by_reason': by_reason,
+                    'by_salesman': by_salesman
+                },
+                'salesman_balances': salesman_balances
             })
             
         except Exception as e:
