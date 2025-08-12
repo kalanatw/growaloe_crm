@@ -6,9 +6,13 @@ from django.contrib.auth import get_user_model
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.utils import timezone
+from django.http import FileResponse, Http404
 from datetime import datetime, timedelta
 from decimal import Decimal
+import os
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiExample
+
+from .excel_service import ExcelReportService, generate_all_reports, generate_monthly_reports, generate_weekly_reports
 
 from .models import DashboardMetrics, SalesReport, InventoryReport, FinancialReport
 from .serializers import (
@@ -888,3 +892,606 @@ class ReportsAnalyticsViewSet(viewsets.ViewSet):
         
         serializer = ProductPerformanceSerializer(performance_data, many=True)
         return Response(serializer.data)
+    @extend_schema(
+        summary="Generate Master Dashboard Excel Report",
+        description="Generate comprehensive Excel report with executive summary and KPIs",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="Excel file download",
+                examples=[
+                    OpenApiExample(
+                        "Success Response",
+                        value={"message": "Report generated successfully", "filename": "master_dashboard_20250101_20250131.xlsx"}
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_master_dashboard_excel(self, request):
+        """
+        Generate Master Dashboard Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_master_dashboard(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Delivery Performance Excel Report",
+        description="Generate detailed delivery performance and settlement analysis report",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(description="Excel file download"),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_delivery_performance_excel(self, request):
+        """
+        Generate Delivery Performance Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_delivery_performance(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Salesman Performance Excel Report",
+        description="Generate comprehensive salesman performance analysis with individual and comparative metrics",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(description="Excel file download"),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_salesman_performance_excel(self, request):
+        """
+        Generate Salesman Performance Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_salesman_performance(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Cash Flow Analysis Excel Report",
+        description="Generate detailed cash flow analysis with payment methods and settlement tracking",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(description="Excel file download"),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_cash_flow_excel(self, request):
+        """
+        Generate Cash Flow Analysis Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_cash_flow_analysis(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Product Analytics Excel Report",
+        description="Generate comprehensive product performance and inventory insights report",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(description="Excel file download"),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_product_analytics_excel(self, request):
+        """
+        Generate Product Analytics Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_product_analytics(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Customer Analysis Excel Report",
+        description="Generate customer relationship and territory analysis report",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(description="Excel file download"),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_customer_analysis_excel(self, request):
+        """
+        Generate Customer Analysis Excel Report
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate report
+            service = ExcelReportService()
+            filepath = service.generate_customer_analysis(date_from, date_to)
+            
+            # Return file response
+            if os.path.exists(filepath):
+                response = FileResponse(
+                    open(filepath, 'rb'),
+                    as_attachment=True,
+                    filename=os.path.basename(filepath),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                return response
+            else:
+                return Response(
+                    {'error': 'Report generation failed'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate All Excel Reports",
+        description="Generate all report types in a single request (Master Dashboard, Delivery Performance, Salesman Performance, Cash Flow, Product Analytics, Customer Analysis)",
+        parameters=[
+            OpenApiParameter(
+                name='date_from',
+                description='Start date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            ),
+            OpenApiParameter(
+                name='date_to',
+                description='End date (YYYY-MM-DD)',
+                required=False,
+                type=str
+            )
+        ],
+        responses={
+            200: OpenApiResponse(
+                description="List of generated report files",
+                examples=[
+                    OpenApiExample(
+                        "Success Response",
+                        value={
+                            "message": "All reports generated successfully",
+                            "reports": {
+                                "master_dashboard": "master_dashboard_20250101_20250131.xlsx",
+                                "delivery_performance": "delivery_performance_20250101_20250131.xlsx",
+                                "salesman_performance": "salesman_performance_20250101_20250131.xlsx",
+                                "cash_flow_analysis": "cash_flow_analysis_20250101_20250131.xlsx",
+                                "product_analytics": "product_analytics_20250101_20250131.xlsx",
+                                "customer_analysis": "customer_analysis_20250101_20250131.xlsx"
+                            }
+                        }
+                    )
+                ]
+            ),
+            400: OpenApiResponse(description="Invalid date parameters")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_all_excel_reports(self, request):
+        """
+        Generate All Excel Reports
+        """
+        try:
+            # Parse date parameters
+            date_from_str = request.data.get('date_from')
+            date_to_str = request.data.get('date_to')
+            
+            if date_from_str and date_to_str:
+                date_from = datetime.strptime(date_from_str, '%Y-%m-%d').date()
+                date_to = datetime.strptime(date_to_str, '%Y-%m-%d').date()
+            else:
+                # Default to current month
+                today = timezone.now().date()
+                date_from = today.replace(day=1)
+                date_to = today
+            
+            # Generate all reports
+            reports = generate_all_reports(date_from, date_to)
+            
+            # Return list of generated files
+            report_files = {}
+            for report_type, filepath in reports.items():
+                if os.path.exists(filepath):
+                    report_files[report_type] = os.path.basename(filepath)
+            
+            return Response({
+                'message': f'Generated {len(report_files)} reports successfully',
+                'reports': report_files,
+                'date_range': f'{date_from} to {date_to}'
+            })
+                
+        except ValueError as e:
+            return Response(
+                {'error': f'Invalid date format: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Monthly Excel Reports",
+        description="Generate all report types for the current month",
+        responses={
+            200: OpenApiResponse(description="List of generated monthly report files"),
+            500: OpenApiResponse(description="Report generation failed")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_monthly_excel_reports(self, request):
+        """
+        Generate Monthly Excel Reports
+        """
+        try:
+            # Generate monthly reports
+            reports = generate_monthly_reports()
+            
+            # Return list of generated files
+            report_files = {}
+            for report_type, filepath in reports.items():
+                if os.path.exists(filepath):
+                    report_files[report_type] = os.path.basename(filepath)
+            
+            today = timezone.now().date()
+            first_day = today.replace(day=1)
+            
+            return Response({
+                'message': f'Generated {len(report_files)} monthly reports successfully',
+                'reports': report_files,
+                'period': f'{first_day} to {today}'
+            })
+                
+        except Exception as e:
+            return Response(
+                {'error': f'Monthly report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @extend_schema(
+        summary="Generate Weekly Excel Reports",
+        description="Generate all report types for the current week",
+        responses={
+            200: OpenApiResponse(description="List of generated weekly report files"),
+            500: OpenApiResponse(description="Report generation failed")
+        },
+        tags=['Excel Reports']
+    )
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrDeveloper])
+    def generate_weekly_excel_reports(self, request):
+        """
+        Generate Weekly Excel Reports
+        """
+        try:
+            # Generate weekly reports
+            reports = generate_weekly_reports()
+            
+            # Return list of generated files
+            report_files = {}
+            for report_type, filepath in reports.items():
+                if os.path.exists(filepath):
+                    report_files[report_type] = os.path.basename(filepath)
+            
+            today = timezone.now().date()
+            week_start = today - timedelta(days=today.weekday())
+            
+            return Response({
+                'message': f'Generated {len(report_files)} weekly reports successfully',
+                'reports': report_files,
+                'period': f'{week_start} to {today}'
+            })
+                
+        except Exception as e:
+            return Response(
+                {'error': f'Weekly report generation failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
