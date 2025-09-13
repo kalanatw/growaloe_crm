@@ -121,11 +121,14 @@ class SalesmanSerializer(serializers.ModelSerializer):
     pending_deliveries_value = serializers.SerializerMethodField()
     outstanding_invoices_value = serializers.SerializerMethodField()
     
+    # Agent-specific fields
+    salesman_type_display = serializers.CharField(source='get_salesman_type_display', read_only=True)
+    
     class Meta:
         model = Salesman
         fields = [
             'id', 'owner', 'owner_id', 'user', 'user_id', 'name',
-            'description', 'profit_margin', 'is_active',
+            'description', 'profit_margin', 'is_active', 'salesman_type', 'salesman_type_display',
             'current_balance', 'total_cash_collected', 'total_cash_settled',
             'net_cash_position', 'outstanding_balance', 'last_settlement_date',
             'pending_deliveries_value', 'outstanding_invoices_value',
@@ -180,7 +183,7 @@ class CreateSalesmanSerializer(serializers.ModelSerializer):
     class Meta:
         model = Salesman
         fields = [
-            'user', 'name', 'description', 'profit_margin', 'is_active'
+            'user', 'name', 'description', 'profit_margin', 'is_active', 'salesman_type'
         ]
     
     def create(self, validated_data):
@@ -351,3 +354,22 @@ class SalesmanCashTransactionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'transaction_type_display', 'created_by_name', 'created_at'
         ]
+
+
+# Agent-specific serializers will be defined in products/serializers.py to avoid circular imports
+
+
+class AgentBalanceSummarySerializer(serializers.Serializer):
+    """Serializer for agent balance summary"""
+    agent_id = serializers.IntegerField()
+    agent_name = serializers.CharField()
+    salesman_type = serializers.CharField()
+    current_balance = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_purchases = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_returns = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_payments_made = serializers.DecimalField(max_digits=12, decimal_places=2)
+    net_position = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pending_deliveries_count = serializers.IntegerField()
+    pending_returns_count = serializers.IntegerField()
+    last_purchase_date = serializers.DateTimeField(allow_null=True)
+    last_payment_date = serializers.DateTimeField(allow_null=True)

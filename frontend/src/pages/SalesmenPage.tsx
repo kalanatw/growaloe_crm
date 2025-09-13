@@ -12,7 +12,9 @@ import {
   Mail, 
   MapPin, 
   Calendar,
-  DollarSign
+  DollarSign,
+  Package,
+  Filter
 } from 'lucide-react';
 import { salesmanService } from '../services/apiServices';
 import { Salesman } from '../types';
@@ -25,6 +27,7 @@ export const SalesmenPage: React.FC = () => {
   const { user } = useAuth();
   const [salesmen, setSalesmen] = useState<Salesman[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [filterType, setFilterType] = useState<'all' | 'employee' | 'agent'>('all');
 
   useEffect(() => {
     loadSalesmen();
@@ -106,7 +109,7 @@ export const SalesmenPage: React.FC = () => {
         </div>
 
         {/* Stats Summary */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div className="card p-6">
             <div className="flex items-center justify-between">
               <div>
@@ -124,7 +127,33 @@ export const SalesmenPage: React.FC = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                  Active Salesmen
+                  Employees
+                </p>
+                <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                  {salesmen.filter(s => s.salesman_type === 'employee' || !s.salesman_type).length}
+                </p>
+              </div>
+              <Users className="h-8 w-8 text-blue-600 dark:text-blue-400" />
+            </div>
+          </div>
+          <div className="card p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                  Agents
+                </p>
+                <p className="text-2xl font-bold text-orange-600 dark:text-orange-400">
+                  {salesmen.filter(s => s.salesman_type === 'agent').length}
+                </p>
+              </div>
+              <Package className="h-8 w-8 text-orange-600 dark:text-orange-400" />
+            </div>
+          </div>
+          <div className="card p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                  Active
                 </p>
                 <p className="text-2xl font-bold text-green-600 dark:text-green-400">
                   {salesmen.filter(s => s.is_active).length}
@@ -137,7 +166,7 @@ export const SalesmenPage: React.FC = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                  Inactive Salesmen
+                  Inactive
                 </p>
                 <p className="text-2xl font-bold text-red-600 dark:text-red-400">
                   {salesmen.filter(s => !s.is_active).length}
@@ -148,8 +177,58 @@ export const SalesmenPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Filter Controls */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <Filter className="h-5 w-5 text-gray-400" />
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Filter by type:</span>
+            </div>
+            <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+              <button
+                onClick={() => setFilterType('all')}
+                className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+                  filterType === 'all'
+                    ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setFilterType('employee')}
+                className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+                  filterType === 'employee'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                Employees
+              </button>
+              <button
+                onClick={() => setFilterType('agent')}
+                className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
+                  filterType === 'agent'
+                    ? 'bg-orange-600 text-white shadow-sm'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                }`}
+              >
+                Agents
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Salesmen List */}
-        {salesmen.length === 0 ? (
+        {(() => {
+          const filteredSalesmen = salesmen.filter(salesman => {
+            if (filterType === 'all') return true;
+            if (filterType === 'employee') return salesman.salesman_type === 'employee' || !salesman.salesman_type;
+            if (filterType === 'agent') return salesman.salesman_type === 'agent';
+            return true;
+          });
+
+          return filteredSalesmen.length === 0 ? (
           <div className="card p-12 text-center">
             <Users className="h-16 w-16 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
@@ -168,7 +247,7 @@ export const SalesmenPage: React.FC = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {salesmen.map((salesman) => (
+            {filteredSalesmen.map((salesman) => (
               <div
                 key={salesman.id}
                 className="card p-6 hover:shadow-lg transition-shadow duration-200"
@@ -188,6 +267,27 @@ export const SalesmenPage: React.FC = () => {
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
+                    {/* Salesman Type Badge */}
+                    <span
+                      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                        salesman.salesman_type === 'agent'
+                          ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
+                          : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                      }`}
+                    >
+                      {salesman.salesman_type === 'agent' ? (
+                        <>
+                          <Package className="h-3 w-3 mr-1" />
+                          Agent
+                        </>
+                      ) : (
+                        <>
+                          <Users className="h-3 w-3 mr-1" />
+                          Employee
+                        </>
+                      )}
+                    </span>
+                    {/* Active Status Badge */}
                     <span
                       className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                         salesman.is_active
@@ -265,7 +365,8 @@ export const SalesmenPage: React.FC = () => {
               </div>
             ))}
           </div>
-        )}
+        );
+        })()}
       </div>
     </Layout>
   );

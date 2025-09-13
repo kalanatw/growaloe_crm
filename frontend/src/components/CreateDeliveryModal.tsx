@@ -1,14 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useForm, useFieldArray } from 'react-hook-form';
 import { X, Plus, Minus, Package } from 'lucide-react';
-import { productService } from '../services/apiServices';
-import { Product, Salesman, CreateDeliveryData } from '../types';
+import { productService, deliveryService } from '../services/apiServices';
+import { Product, Salesman, CreateDeliveryData, Delivery } from '../types';
 import toast from 'react-hot-toast';
 
 interface CreateDeliveryModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (data: CreateDeliveryData) => void;
+  onSubmit: (data: CreateDeliveryData) => Promise<any>;
   salesmen: Salesman[];
 }
 
@@ -16,6 +16,7 @@ interface DeliveryFormData {
   salesman: number;
   delivery_date: string;
   notes: string;
+  salesman_type?: 'employee' | 'agent'; // Add salesman type
   items: {
     product: number;
     quantity: number;
@@ -44,6 +45,12 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
   const [products, setProducts] = useState<Product[]>([]);
   const [stockSummary, setStockSummary] = useState<StockSummaryItem[]>([]);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
+  const [selectedSalesmanType, setSelectedSalesmanType] = useState<'employee' | 'agent' | null>(null);
+  
+  // Agent delivery specific state
+  const [isAgentDelivery, setIsAgentDelivery] = useState(false);
+  const [showReceiptDownload, setShowReceiptDownload] = useState(false);
+  const [createdDelivery, setCreatedDelivery] = useState<any>(null);
 
   const {
     register,
@@ -66,11 +73,27 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
     name: 'items',
   });
 
+  const watchedSalesman = watch('salesman');
+
   useEffect(() => {
     if (isOpen) {
       loadProducts();
     }
   }, [isOpen]);
+
+  // Update selected salesman type when salesman changes
+  useEffect(() => {
+    if (watchedSalesman && watchedSalesman > 0) {
+      const selectedSalesman = salesmen.find(s => s.id === watchedSalesman);
+      if (selectedSalesman) {
+        setSelectedSalesmanType(selectedSalesman.salesman_type as 'employee' | 'agent');
+        setIsAgentDelivery(selectedSalesman.salesman_type === 'agent');
+      }
+    } else {
+      setSelectedSalesmanType(null);
+      setIsAgentDelivery(false);
+    }
+  }, [watchedSalesman, salesmen]);
 
   const loadProducts = async () => {
     try {
@@ -90,7 +113,7 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
     }
   };
 
-  const handleFormSubmit = (data: DeliveryFormData) => {
+  const handleFormSubmit = async (data: DeliveryFormData) => {
     // Validate that at least one item is selected
     const validItems = data.items.filter(item => item.product > 0 && item.quantity > 0);
 
@@ -116,7 +139,37 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
       })),
     };
 
-    onSubmit(deliveryData);
+    try {
+      // Call the parent's onSubmit function and wait for the result
+      const result = await onSubmit(deliveryData);
+      
+      // If this is an agent delivery, show receipt download option
+      if (isAgentDelivery && result) {
+        setCreatedDelivery(result);
+        setShowReceiptDownload(true);
+        toast.success('Agent delivery created successfully! Receipt is ready for download.');
+      }
+    } catch (error) {
+      console.error('Error creating delivery:', error);
+      toast.error('Failed to create delivery');
+    }
+  };
+
+  // Add receipt download function
+  const downloadAgentReceipt = async (deliveryId: number) => {
+    try {
+      const blob = await deliveryService.downloadAgentDeliveryReceipt(deliveryId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `agent_delivery_receipt_${deliveryId}.pdf`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success('Receipt downloaded successfully!');
+    } catch (error) {
+      console.error('Error downloading receipt:', error);
+      toast.error('Failed to download receipt');
+    }
   };
 
   const handleClose = () => {
@@ -169,12 +222,40 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
                 <option value={0}>Select Salesman</option>
                 {salesmen.map((salesman) => (
                   <option key={salesman.id} value={salesman.id}>
-                    {salesman.name}
+                    {salesman.name} {salesman.salesman_type === 'agent' ? '(Agent)' : '(Employee)'}
                   </option>
                 ))}
               </select>
               {errors.salesman && (
                 <p className="text-red-500 text-sm mt-1">{errors.salesman.message}</p>
+              )}
+              
+              {/* Show delivery type indicator */}
+              {selectedSalesmanType && (
+                <div className={`mt-2 p-3 rounded-lg ${
+                  selectedSalesmanType === 'agent' 
+                    ? 'bg-orange-50 border border-orange-200' 
+                    : 'bg-blue-50 border border-blue-200'
+                }`}>
+                  <div className="flex items-center space-x-2">
+                    <div className={`w-2 h-2 rounded-full ${
+                      selectedSalesmanType === 'agent' ? 'bg-orange-500' : 'bg-blue-500'
+                    }`}></div>
+                    <span className={`text-sm font-medium ${
+                      selectedSalesmanType === 'agent' ? 'text-orange-800' : 'text-blue-800'
+                    }`}>
+                      {selectedSalesmanType === 'agent' ? 'Agent Delivery' : 'Employee Delivery'}
+                    </span>
+                  </div>
+                  <p className={`text-xs mt-1 ${
+                    selectedSalesmanType === 'agent' ? 'text-orange-600' : 'text-blue-600'
+                  }`}>
+                    {selectedSalesmanType === 'agent' 
+                      ? 'Agent purchases products directly. Payment required immediately upon delivery.'
+                      : 'Products allocated to employee on consignment basis. Settlement after sales.'
+                    }
+                  </p>
+                </div>
               )}
             </div>
 
@@ -352,6 +433,30 @@ export const CreateDeliveryModal: React.FC<CreateDeliveryModalProps> = ({
             </button>
           </div>
         </form>
+
+        {/* Receipt download section for agent deliveries */}
+        {showReceiptDownload && createdDelivery && (
+          <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+            <h4 className="text-sm font-medium text-green-800 mb-2">Agent Delivery Created Successfully!</h4>
+            <p className="text-sm text-green-600 mb-3">
+              The agent's balance has been updated and an invoice has been generated.
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => downloadAgentReceipt(createdDelivery.id)}
+                className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 text-sm"
+              >
+                Download Receipt
+              </button>
+              <button
+                onClick={handleClose}
+                className="bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

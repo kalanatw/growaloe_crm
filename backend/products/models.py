@@ -294,6 +294,41 @@ class Delivery(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    # Agent-specific fields
+    is_agent_delivery = models.BooleanField(
+        default=False,
+        help_text="True if this is an agent purchase (immediate payment required)"
+    )
+    agent_purchase_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Total amount agent must pay immediately for this delivery"
+    )
+    agent_payment_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending Payment'),
+            ('paid', 'Fully Paid'),
+            ('partial', 'Partially Paid'),
+        ],
+        default='pending',
+        help_text="Payment status for agent deliveries"
+    )
+    agent_payment_date = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When the agent payment was completed"
+    )
+    agent_invoice = models.OneToOneField(
+        'sales.Invoice',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='agent_delivery',
+        help_text="Invoice created for agent deliveries"
+    )
+    
     def __str__(self):
         return f"Delivery #{self.delivery_number} - {self.salesman.name}"
     
@@ -543,6 +578,113 @@ class Delivery(models.Model):
         verbose_name_plural = 'Deliveries'
 
 
+class AgentReturn(models.Model):
+    """Track product returns from agents for refund/credit"""
+    
+    RETURN_REASONS = [
+        ('defective', 'Defective Product'),
+        ('expired', 'Expired Product'),
+        ('damaged', 'Damaged in Transit'),
+        ('wrong_product', 'Wrong Product'),
+        ('customer_complaint', 'Customer Complaint'),
+        ('overstock', 'Overstock'),
+        ('other', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending Approval'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('processed', 'Processed'),
+    ]
+    
+    return_number = models.CharField(max_length=100, unique=True)
+    agent = models.ForeignKey(Salesman, on_delete=models.CASCADE, related_name='agent_returns')
+    original_delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='agent_returns')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    batch = models.ForeignKey('Batch', on_delete=models.CASCADE, related_name='agent_returns', null=True, blank=True)
+    quantity = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Original purchase price")
+    return_amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Total refund amount")
+    reason = models.CharField(max_length=20, choices=RETURN_REASONS)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Approval tracking
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_agent_returns')
+    approved_date = models.DateTimeField(null=True, blank=True)
+    processed_date = models.DateTimeField(null=True, blank=True)
+    
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Agent Return {self.return_number} - {self.product.name} x {self.quantity}"
+    
+    def save(self, *args, **kwargs):
+        if not self.return_number:
+            self.return_number = self.generate_return_number()
+        
+        # Calculate return amount
+        self.return_amount = self.quantity * self.unit_price
+        
+        super().save(*args, **kwargs)
+    
+    def generate_return_number(self):
+        """Generate unique return number"""
+        from datetime import datetime
+        today = datetime.now()
+        prefix = f"AGR{today.strftime('%Y%m')}"
+        
+        last_return = AgentReturn.objects.filter(
+            return_number__startswith=prefix
+        ).order_by('-return_number').first()
+        
+        if last_return:
+            last_number = int(last_return.return_number[-4:])
+            new_number = last_number + 1
+        else:
+            new_number = 1
+        
+        return f"{prefix}{new_number:04d}"
+    
+    def approve_return(self, approved_by_user):
+        """Approve the return and update agent balance"""
+        if self.status != 'pending':
+            raise ValueError("Only pending returns can be approved")
+        
+        self.status = 'approved'
+        self.approved_by = approved_by_user
+        self.approved_date = timezone.now()
+        self.save()
+        
+        # Update agent balance (credit the return amount)
+        self.agent.current_balance -= self.return_amount
+        self.agent.save()
+        
+        # Restore inventory if needed
+        if self.batch:
+            self.batch.current_quantity += self.quantity
+            self.batch.save()
+            
+            # Create batch transaction
+            BatchTransaction.objects.create(
+                batch=self.batch,
+                transaction_type='return',
+                quantity=self.quantity,
+                balance_after=self.batch.current_quantity,
+                reference_type='agent_return',
+                reference_id=self.id,
+                notes=f"Agent return: {self.return_number} - {self.reason}",
+                created_by=approved_by_user
+            )
+    
+    class Meta:
+        db_table = 'agent_returns'
+        ordering = ['-created_at']
+
+
 class DeliveryItem(models.Model):
     """Individual items in a delivery"""
     delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='items')
@@ -573,14 +715,58 @@ class DeliveryItem(models.Model):
         
         super().save(*args, **kwargs)
         
-        # Always allocate stock for every new item
+        # Handle stock allocation based on delivery type
         if is_new:
-            self._allocate_stock_to_salesman()
+            if self.delivery.is_agent_delivery:
+                self._handle_agent_purchase()
+            else:
+                self._allocate_stock_to_salesman()
+        
+        # Update delivery purchase amount for agents
+        if self.delivery.is_agent_delivery:
+            self._update_agent_purchase_amount()
     
     def delete(self, *args, **kwargs):
         # Return allocated stock when item is deleted
         self._deallocate_stock_from_salesman()
         super().delete(*args, **kwargs)
+    
+    def _handle_agent_purchase(self):
+        """Handle agent purchase - immediate stock transfer and payment requirement"""
+        # For agents, stock is immediately transferred (they own it)
+        # No batch assignments needed as ownership transfers immediately
+        
+        # Reduce stock from owner's batches using FIFO
+        try:
+            self.product.reduce_stock(
+                quantity=self.quantity,
+                user=self.delivery.created_by,
+                notes=f'Agent purchase via delivery {self.delivery.delivery_number}',
+                movement_type='sale'
+            )
+        except ValueError as e:
+            raise ValueError(f"Insufficient stock for agent purchase: {str(e)}")
+        
+        # Create stock movement record for the agent purchase
+        StockMovement.objects.create(
+            product=self.product,
+            salesman=self.delivery.salesman,
+            movement_type='sale',
+            quantity=-self.quantity,  # Negative for outward movement
+            reference_id=self.delivery.delivery_number,
+            notes=f'Agent purchase via delivery {self.delivery.delivery_number}',
+            created_by=self.delivery.created_by
+        )
+    
+    def _update_agent_purchase_amount(self):
+        """Update the total purchase amount for agent delivery"""
+        if self.delivery.is_agent_delivery:
+            total_amount = sum(
+                item.quantity * item.unit_price 
+                for item in self.delivery.items.all()
+            )
+            self.delivery.agent_purchase_amount = total_amount
+            self.delivery.save()
     
     def _allocate_stock_to_salesman(self):
         """Allocate stock from owner's batches to salesman using FIFO"""
@@ -666,27 +852,39 @@ class DeliveryItem(models.Model):
     
     def _deallocate_stock_from_salesman(self):
         """Deallocate stock assignments when delivery item is deleted"""
-        # Find and remove batch assignments for this delivery item
-        assignments = BatchAssignment.objects.filter(
-            batch__product=self.product,
-            salesman=self.delivery.salesman,
-            notes__contains=f"Delivery: {self.delivery.delivery_number}"
-        )
-        
-        for assignment in assignments:
-            # Create reversal transaction
-            BatchTransaction.objects.create(
-                batch=assignment.batch,
-                transaction_type='return',
-                quantity=assignment.delivered_quantity - assignment.returned_quantity,
-                balance_after=assignment.batch.current_quantity,
-                reference_type='delivery_cancellation',
-                reference_id=self.id,
-                notes=f"Delivery cancelled: {self.delivery.delivery_number}",
-                created_by=self.delivery.created_by
+        if self.delivery.is_agent_delivery:
+            # For agent deliveries, we need to restore stock to owner
+            self.product.add_stock(
+                quantity=self.quantity,
+                user=self.delivery.created_by,
+                notes=f'Agent delivery cancelled: {self.delivery.delivery_number}'
+            )
+        else:
+            # For employee deliveries, remove batch assignments
+            assignments = BatchAssignment.objects.filter(
+                batch__product=self.product,
+                salesman=self.delivery.salesman,
+                notes__contains=f"Delivery: {self.delivery.delivery_number}"
             )
             
-            assignment.delete()
+            for assignment in assignments:
+                # Create reversal transaction
+                BatchTransaction.objects.create(
+                    batch=assignment.batch,
+                    transaction_type='return',
+                    quantity=assignment.delivered_quantity - assignment.returned_quantity,
+                    balance_after=assignment.batch.current_quantity,
+                    reference_type='delivery_cancellation',
+                    reference_id=self.id,
+                    notes=f"Delivery cancelled: {self.delivery.delivery_number}",
+                    created_by=self.delivery.created_by
+                )
+                
+                assignment.delete()
+    
+    class Meta:
+        db_table = 'delivery_items'
+        unique_together = ['delivery', 'product']
     
     class Meta:
         db_table = 'delivery_items'
@@ -1310,7 +1508,115 @@ class DeliverySettlementItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class AgentReturn(models.Model):
+    """Track product returns from agents for refund/credit"""
+    
+    RETURN_REASONS = [
+        ('defective', 'Defective Product'),
+        ('expired', 'Expired Product'),
+        ('damaged', 'Damaged in Transit'),
+        ('wrong_product', 'Wrong Product'),
+        ('customer_complaint', 'Customer Complaint'),
+        ('overstock', 'Overstock'),
+        ('other', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending Approval'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('processed', 'Processed'),
+    ]
+    
+    return_number = models.CharField(max_length=100, unique=True)
+    agent = models.ForeignKey('accounts.Salesman', on_delete=models.CASCADE, related_name='agent_returns')
+    original_delivery = models.ForeignKey(Delivery, on_delete=models.CASCADE, related_name='agent_returns')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    batch = models.ForeignKey('Batch', on_delete=models.CASCADE, related_name='agent_returns', null=True, blank=True)
+    quantity = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Original purchase price")
+    return_amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Total refund amount")
+    reason = models.CharField(max_length=20, choices=RETURN_REASONS)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Approval tracking
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_agent_returns')
+    approved_date = models.DateTimeField(null=True, blank=True)
+    processed_date = models.DateTimeField(null=True, blank=True)
+    
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Agent Return {self.return_number} - {self.product.name} x {self.quantity}"
+    
+    def save(self, *args, **kwargs):
+        if not self.return_number:
+            self.return_number = self.generate_return_number()
+        
+        # Calculate return amount
+        self.return_amount = self.quantity * self.unit_price
+        
+        super().save(*args, **kwargs)
+    
+    def generate_return_number(self):
+        """Generate unique return number"""
+        from datetime import datetime
+        today = datetime.now()
+        prefix = f"AGR{today.strftime('%Y%m')}"
+        
+        last_return = AgentReturn.objects.filter(
+            return_number__startswith=prefix
+        ).order_by('-return_number').first()
+        
+        if last_return:
+            last_number = int(last_return.return_number[-4:])
+            new_number = last_number + 1
+        else:
+            new_number = 1
+        
+        return f"{prefix}{new_number:04d}"
+    
+    def approve_return(self, approved_by_user):
+        """Approve the return and update agent balance"""
+        if self.status != 'pending':
+            raise ValueError("Only pending returns can be approved")
+        
+        self.status = 'approved'
+        self.approved_by = approved_by_user
+        self.approved_date = timezone.now()
+        self.save()
+        
+        # Update agent balance (credit the return amount)
+        self.agent.current_balance -= self.return_amount
+        self.agent.save()
+        
+        # Restore inventory if needed
+        if self.batch:
+            self.batch.current_quantity += self.quantity
+            self.batch.save()
+            
+            # Create batch transaction
+            BatchTransaction.objects.create(
+                batch=self.batch,
+                transaction_type='return',
+                quantity=self.quantity,
+                balance_after=self.batch.current_quantity,
+                reference_type='agent_return',
+                reference_id=self.id,
+                notes=f"Agent return: {self.return_number} - {self.reason}",
+                created_by=approved_by_user
+            )
+    
+    class Meta:
+        db_table = 'agent_returns'
+        ordering = ['-created_at']
+
+
 class DeliveryExpense(models.Model):
+    """Track expenses incurred during deliveries"""
     CATEGORY_CHOICES = [
         ('food', 'Food'),
         ('transportation', 'Transportation'),
@@ -1331,8 +1637,6 @@ class DeliveryExpense(models.Model):
     class Meta:
         db_table = 'delivery_expenses'
         ordering = ['-created_at']
-
-
 
     def __str__(self):
         return f"{self.delivery} - {self.category}: {self.amount}"

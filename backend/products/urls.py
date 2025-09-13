@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 from . import salesman_views
+from . import agent_views
 
 router = DefaultRouter()
 router.register(r'categories', views.CategoryViewSet)
@@ -18,6 +19,10 @@ router.register(r'returns', views.ProductReturnViewSet, basename='productreturns
 # New salesman-centric endpoints
 router.register(r'salesman-deliveries', salesman_views.SalesmanDeliveryViewSet, basename='salesmandeliveries')
 router.register(r'delivery-settlements', salesman_views.DeliverySettlementViewSet, basename='deliverysettlements')
+
+# Agent-specific endpoints
+router.register(r'agent-returns', agent_views.AgentReturnViewSet, basename='agentreturns')
+router.register(r'agent-deliveries', agent_views.AgentDeliveryViewSet, basename='agentdeliveries')
 
 urlpatterns = [
     # Router URLs - all product endpoints are handled by ViewSets

@@ -1661,8 +1661,15 @@ class DeliveryViewSet(viewsets.ModelViewSet):
         return DeliverySerializer
     
     def perform_create(self, serializer):
-        """Set the creator when creating a delivery"""
-        serializer.save(created_by=self.request.user)
+        """Enhanced delivery creation with agent support"""
+        delivery = serializer.save(created_by=self.request.user)
+        
+        # Check if this is an agent delivery
+        if delivery.salesman.salesman_type == 'agent':
+            # For agents, create invoice immediately and update balance
+            self._create_agent_invoice_and_update_balance(delivery)
+        
+        return delivery
     
     def perform_update(self, serializer):
         """Limit what can be updated based on delivery status"""
@@ -2530,6 +2537,82 @@ class DeliveryViewSet(viewsets.ModelViewSet):
                 {'error': f'Cash collection failed: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _create_agent_invoice_and_update_balance(self, delivery):
+        """Create invoice for agent delivery and update agent balance"""
+        from sales.models import Invoice, InvoiceItem
+        from accounts.models import SalesmanCashTransaction
+        from decimal import Decimal
+        
+        # Create invoice for the agent delivery
+        invoice = Invoice.objects.create(
+            shop=None,  # Agent deliveries don't have shops initially
+            salesman=delivery.salesman,
+            invoice_date=delivery.delivery_date,
+            status='pending',
+            notes=f'Agent delivery: {delivery.delivery_number}',
+            created_by=self.request.user
+        )
+        
+        # Create invoice items from delivery items
+        total_amount = Decimal('0.00')
+        for delivery_item in delivery.items.all():
+            invoice_item = InvoiceItem.objects.create(
+                invoice=invoice,
+                product=delivery_item.product,
+                quantity=delivery_item.quantity,
+                unit_price=delivery_item.unit_price,
+                notes=f'From delivery: {delivery.delivery_number}'
+            )
+            total_amount += invoice_item.total_price
+        
+        # Update agent balance immediately (agent owes owner)
+        agent = delivery.salesman
+        balance_before = agent.current_balance
+        agent.current_balance += total_amount  # Increase debt to owner
+        agent.save()
+        
+        # Record balance transaction
+        SalesmanCashTransaction.objects.create(
+            salesman=agent,
+            transaction_type='advance',  # Agent received products on credit
+            amount=total_amount,
+            balance_before=balance_before,
+            balance_after=agent.current_balance,
+            reference_type='agent_delivery',
+            reference_id=delivery.id,
+            description=f'Agent delivery: {delivery.delivery_number} - Products received on credit',
+            created_by=self.request.user
+        )
+        
+        # Link invoice to delivery for receipt generation
+        delivery.agent_invoice = invoice
+        delivery.save()
+
+    @action(detail=True, methods=['post'])
+    def generate_agent_receipt(self, request, pk=None):
+        """Generate receipt for agent delivery"""
+        delivery = self.get_object()
+        
+        if delivery.salesman.salesman_type != 'agent':
+            return Response(
+                {'error': 'Receipt generation only available for agent deliveries'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not delivery.agent_invoice:
+            return Response(
+                {'error': 'No invoice found for this agent delivery'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Use existing PDF generation logic from InvoiceViewSet
+        from sales.views import InvoiceViewSet
+        invoice_viewset = InvoiceViewSet()
+        invoice_viewset.request = request
+        
+        # Generate PDF for the agent invoice
+        return invoice_viewset.generate_pdf(request, pk=delivery.agent_invoice.id)
 
 
 @extend_schema_view(

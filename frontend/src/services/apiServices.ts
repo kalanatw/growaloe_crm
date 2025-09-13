@@ -409,6 +409,50 @@ export const deliveryService = {
     return apiClient.post<Delivery>('/products/deliveries/', data);
   },
 
+  // Agent-specific delivery methods
+  createAgentDelivery: async (data: CreateDeliveryData & { salesman_type: 'agent' }): Promise<Delivery> => {
+    return apiClient.post<Delivery>('/products/agent-deliveries/', data);
+  },
+
+  getAgentDeliveries: async (): Promise<{ results: any[] }> => {
+    return apiClient.get<{ results: any[] }>('/products/agent-deliveries/');
+  },
+
+  processAgentPayment: async (deliveryId: number, data: {
+    payment_amount: number;
+    payment_method?: string;
+    notes?: string;
+  }): Promise<{
+    message: string;
+    delivery_id: number;
+    payment_amount: number;
+    payment_status: string;
+    agent_balance: number;
+    remaining_amount: number;
+  }> => {
+    return apiClient.post(`/products/agent-deliveries/${deliveryId}/process_payment/`, data);
+  },
+
+  getAgentPaymentSummary: async (): Promise<{
+    total_deliveries: number;
+    total_amount: number;
+    by_status: Array<{
+      agent_payment_status: string;
+      count: number;
+      amount: number;
+    }>;
+    by_agent: Array<{
+      salesman__id: number;
+      salesman__name: string;
+      delivery_count: number;
+      total_amount: number;
+      paid_count: number;
+      pending_count: number;
+    }>;
+  }> => {
+    return apiClient.get('/products/agent-deliveries/payment_summary/');
+  },
+
   updateDelivery: async (id: number, data: Partial<CreateDeliveryData>): Promise<Delivery> => {
     return apiClient.put<Delivery>(`/products/deliveries/${id}/`, data);
   },
@@ -419,6 +463,22 @@ export const deliveryService = {
 
   markAsDelivered: async (id: number): Promise<Delivery> => {
     return apiClient.post<Delivery>(`/products/deliveries/${id}/mark_delivered/`);
+  },
+
+  // Agent delivery receipt download
+  downloadAgentDeliveryReceipt: async (deliveryId: number): Promise<Blob> => {
+    const response = await fetch(`${process.env.REACT_APP_API_URL}/products/deliveries/${deliveryId}/generate_agent_receipt/`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${localStorage.getItem('token')}`,
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to download agent delivery receipt');
+    }
+    
+    return response.blob();
   },
 
   // New salesman-centric delivery management methods
@@ -943,6 +1003,133 @@ export const deliveryService = {
 };
 
 
+
+// Agent-specific services
+export const agentService = {
+  // Agent returns management
+  getAgentReturns: async (): Promise<{ results: any[] }> => {
+    return apiClient.get<{ results: any[] }>('/products/agent-returns/');
+  },
+
+  createAgentReturn: async (data: {
+    agent: number;
+    original_delivery: number;
+    product: number;
+    batch?: number;
+    quantity: number;
+    unit_price: number;
+    reason: string;
+    notes?: string;
+  }): Promise<any> => {
+    return apiClient.post('/products/agent-returns/', data);
+  },
+
+  approveAgentReturn: async (returnId: number): Promise<{
+    message: string;
+    return_number: string;
+    return_amount: number;
+    agent_balance_after: number;
+  }> => {
+    return apiClient.post(`/products/agent-returns/${returnId}/approve/`);
+  },
+
+  rejectAgentReturn: async (returnId: number, data: {
+    rejection_reason: string;
+  }): Promise<{
+    message: string;
+    return_number: string;
+    rejection_reason: string;
+  }> => {
+    return apiClient.post(`/products/agent-returns/${returnId}/reject/`, data);
+  },
+
+  getAgentReturnsSummary: async (): Promise<{
+    total_pending: number;
+    total_amount: number;
+    by_agent: Array<{
+      agent__id: number;
+      agent__name: string;
+      pending_count: number;
+      pending_amount: number;
+    }>;
+    by_reason: Array<{
+      reason: string;
+      count: number;
+      amount: number;
+    }>;
+  }> => {
+    return apiClient.get('/products/agent-returns/pending_summary/');
+  },
+
+  // Agent balance and payment management
+  getAgentBalance: async (agentId: number): Promise<{
+    agent_id: number;
+    agent_name: string;
+    salesman_type: string;
+    current_balance: number;
+    total_purchases: number;
+    total_returns: number;
+    total_payments_made: number;
+    net_position: number;
+    pending_deliveries_count: number;
+    pending_returns_count: number;
+    last_purchase_date: string | null;
+    last_payment_date: string | null;
+  }> => {
+    return apiClient.get(`/auth/salesmen/${agentId}/agent_balance/`);
+  },
+
+  processAgentDeliveryPayment: async (agentId: number, data: {
+    delivery_id: number;
+    payment_amount: number;
+    payment_method?: string;
+    notes?: string;
+  }): Promise<{
+    message: string;
+    delivery_id: number;
+    payment_amount: number;
+    payment_status: string;
+    agent_balance: number;
+    remaining_amount: number;
+  }> => {
+    return apiClient.post(`/auth/salesmen/${agentId}/process_agent_payment/`, data);
+  },
+
+  // Get agents only (salesman_type='agent')
+  getAgents: async (): Promise<{ results: any[] }> => {
+    return apiClient.get<{ results: any[] }>('/auth/salesmen/agents/');
+  },
+
+  // Get employees only (salesman_type='employee')  
+  getEmployees: async (): Promise<{ results: any[] }> => {
+    return apiClient.get<{ results: any[] }>('/auth/salesmen/employees/');
+  },
+
+  // Agent deliveries management
+  getAgentDeliveries: async (): Promise<{ results: any[] }> => {
+    return apiClient.get<{ results: any[] }>('/products/agent-deliveries/');
+  },
+
+  getAgentPaymentSummary: async (): Promise<{
+    total_deliveries: number;
+    total_amount: number;
+    by_status: Array<{
+      agent_payment_status: string;
+      count: number;
+      amount: number;
+    }>;
+    by_agent: Array<{
+      salesman__id: number;
+      salesman__name: string;
+      delivery_count: number;
+      total_amount: number;
+      paid_count: number;
+      pending_count: number;
+    }>;
+  }> => {
+    return apiClient.get('/products/agent-deliveries/payment_summary/');
+  },
+};
 
 // Cash Flow Management Services
 export const cashFlowService = {

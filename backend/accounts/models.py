@@ -44,12 +44,26 @@ class Owner(models.Model):
 
 class Salesman(models.Model):
     """Salesman model with owner relationship and margin settings"""
+    
+    SALESMAN_TYPES = [
+        ('employee', 'Employee'),
+        ('agent', 'Agent'),
+    ]
+    
     owner = models.ForeignKey(Owner, on_delete=models.CASCADE, related_name='salesmen')
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='salesman_profile')
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, null=True)
     profit_margin = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)  # Percentage
     is_active = models.BooleanField(default=True)
+    
+    # New agent/employee type field
+    salesman_type = models.CharField(
+        max_length=20, 
+        choices=SALESMAN_TYPES, 
+        default='employee',
+        help_text="Type of salesman: Employee (consignment) or Agent (direct purchase)"
+    )
     
     # New balance tracking fields
     current_balance = models.DecimalField(

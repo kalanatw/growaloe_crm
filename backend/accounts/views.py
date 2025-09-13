@@ -503,6 +503,174 @@ class SalesmanViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset()
         serializer = SalesmanSummarySerializer(queryset, many=True)
         return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def agents(self, request):
+        """Get all agents (salesman_type='agent')"""
+        queryset = self.get_queryset().filter(salesman_type='agent')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def employees(self, request):
+        """Get all employees (salesman_type='employee')"""
+        queryset = self.get_queryset().filter(salesman_type='employee')
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def agent_balance(self, request, pk=None):
+        """Get agent balance summary"""
+        salesman = self.get_object()
+        
+        if salesman.salesman_type != 'agent':
+            return Response(
+                {'error': 'This endpoint is only for agents'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Calculate agent-specific balance data
+        from products.models import Delivery, AgentReturn
+        from django.db.models import Sum
+        
+        # Get total purchases (agent deliveries)
+        total_purchases = Delivery.objects.filter(
+            salesman=salesman,
+            is_agent_delivery=True,
+            status__in=['delivered', 'settled']
+        ).aggregate(total=Sum('agent_purchase_amount'))['total'] or 0
+        
+        # Get total returns
+        total_returns = AgentReturn.objects.filter(
+            agent=salesman,
+            status__in=['approved', 'processed']
+        ).aggregate(total=Sum('return_amount'))['total'] or 0
+        
+        # Get pending deliveries
+        pending_deliveries = Delivery.objects.filter(
+            salesman=salesman,
+            is_agent_delivery=True,
+            agent_payment_status='pending'
+        ).count()
+        
+        # Get pending returns
+        pending_returns = AgentReturn.objects.filter(
+            agent=salesman,
+            status='pending'
+        ).count()
+        
+        # Calculate net position
+        net_position = float(total_purchases) - float(total_returns) - float(salesman.current_balance)
+        
+        balance_data = {
+            'agent_id': salesman.id,
+            'agent_name': salesman.name,
+            'salesman_type': salesman.salesman_type,
+            'current_balance': float(salesman.current_balance),
+            'total_purchases': float(total_purchases),
+            'total_returns': float(total_returns),
+            'total_payments_made': float(salesman.total_cash_settled),
+            'net_position': net_position,
+            'pending_deliveries_count': pending_deliveries,
+            'pending_returns_count': pending_returns,
+            'last_purchase_date': salesman.deliveries.filter(
+                is_agent_delivery=True
+            ).order_by('-created_at').first().created_at if salesman.deliveries.filter(
+                is_agent_delivery=True
+            ).exists() else None,
+            'last_payment_date': salesman.last_settlement_date,
+        }
+        
+        from .serializers import AgentBalanceSummarySerializer
+        serializer = AgentBalanceSummarySerializer(balance_data)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def process_agent_payment(self, request, pk=None):
+        """Process payment for agent delivery"""
+        salesman = self.get_object()
+        
+        if salesman.salesman_type != 'agent':
+            return Response(
+                {'error': 'This endpoint is only for agents'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        delivery_id = request.data.get('delivery_id')
+        payment_amount = request.data.get('payment_amount', 0)
+        payment_method = request.data.get('payment_method', 'cash')
+        notes = request.data.get('notes', '')
+        
+        try:
+            from products.models import Delivery
+            delivery = Delivery.objects.get(
+                id=delivery_id,
+                salesman=salesman,
+                is_agent_delivery=True
+            )
+            
+            if delivery.agent_payment_status == 'paid':
+                return Response(
+                    {'error': 'Delivery is already fully paid'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Validate payment amount
+            if payment_amount <= 0:
+                return Response(
+                    {'error': 'Payment amount must be greater than zero'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if payment_amount > delivery.agent_purchase_amount:
+                return Response(
+                    {'error': f'Payment amount cannot exceed purchase amount of {delivery.agent_purchase_amount}'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Process payment
+            with transaction.atomic():
+                # Update agent balance (increase debt to owner)
+                salesman.current_balance += payment_amount
+                salesman.save()
+                
+                # Update delivery payment status
+                if payment_amount >= delivery.agent_purchase_amount:
+                    delivery.agent_payment_status = 'paid'
+                    delivery.agent_payment_date = timezone.now()
+                else:
+                    delivery.agent_payment_status = 'partial'
+                
+                delivery.save()
+                
+                # Create cash transaction record
+                SalesmanCashTransaction.objects.create(
+                    salesman=salesman,
+                    transaction_type='collection',
+                    amount=payment_amount,
+                    balance_before=salesman.current_balance - payment_amount,
+                    balance_after=salesman.current_balance,
+                    description=f'Agent payment for delivery {delivery.delivery_number}',
+                    reference_type='agent_delivery',
+                    reference_id=delivery.id,
+                    notes=notes,
+                    created_by=request.user
+                )
+            
+            return Response({
+                'message': 'Payment processed successfully',
+                'delivery_id': delivery.id,
+                'payment_amount': float(payment_amount),
+                'payment_status': delivery.agent_payment_status,
+                'agent_balance': float(salesman.current_balance),
+                'remaining_amount': float(delivery.agent_purchase_amount - payment_amount) if delivery.agent_payment_status == 'partial' else 0
+            })
+            
+        except Delivery.DoesNotExist:
+            return Response(
+                {'error': 'Delivery not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
 
 class ShopViewSet(viewsets.ModelViewSet):

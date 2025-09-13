@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { LoadingSpinner } from '../components/LoadingSpinner';
-import { ArrowLeft, Save, User, Mail, Phone, MapPin, DollarSign, FileText } from 'lucide-react';
+import { ArrowLeft, Save, User, Mail, Phone, MapPin, DollarSign, FileText, Users, Package } from 'lucide-react';
 import { salesmanService } from '../services/apiServices';
 import { CreateSalesmanData } from '../types';
 import { useAuth } from '../contexts/AuthContext';
@@ -26,6 +26,7 @@ interface SalesmanFormData {
   description?: string;
   profit_margin: number;
   is_active: boolean;
+  salesman_type: 'employee' | 'agent';
 }
 
 export const CreateSalesmanPage: React.FC = () => {
@@ -42,10 +43,12 @@ export const CreateSalesmanPage: React.FC = () => {
     defaultValues: {
       profit_margin: 10,
       is_active: true,
+      salesman_type: 'employee',
     },
   });
 
   const watchPassword = watch('password');
+  const watchSalesmanType = watch('salesman_type');
 
   // Only allow owners to access this page
   if (user?.role !== USER_ROLES.OWNER) {
@@ -89,10 +92,12 @@ export const CreateSalesmanPage: React.FC = () => {
         description: data.description || '',
         profit_margin: data.profit_margin,
         is_active: data.is_active,
+        salesman_type: data.salesman_type,
       };
 
       await salesmanService.createSalesman(salesmanData);
-      toast.success('Salesman created successfully!');
+      const typeLabel = data.salesman_type === 'agent' ? 'Agent' : 'Employee';
+      toast.success(`${typeLabel} created successfully!`);
       navigate('/salesmen');
     } catch (error: any) {
       console.error('Error creating salesman:', error);
@@ -121,9 +126,17 @@ export const CreateSalesmanPage: React.FC = () => {
               >
                 <ArrowLeft className="h-5 w-5" />
               </button>
-              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
-                Create New Salesman
-              </h2>
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+                  Create New {watchSalesmanType === 'agent' ? 'Agent' : 'Employee'}
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  {watchSalesmanType === 'agent' 
+                    ? 'Set up a new agent who will purchase products directly'
+                    : 'Set up a new employee for consignment-based sales'
+                  }
+                </p>
+              </div>
             </div>
           </div>
 
@@ -269,6 +282,110 @@ export const CreateSalesmanPage: React.FC = () => {
                   />
                 </div>
               </div>
+            </div>
+
+            {/* Salesman Type Selection */}
+            <div>
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
+                <Users className="h-5 w-5 mr-2" />
+                Salesman Type *
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Employee Option */}
+                <div className="relative">
+                  <input
+                    {...register('salesman_type', { required: 'Salesman type is required' })}
+                    type="radio"
+                    value="employee"
+                    id="employee"
+                    className="sr-only"
+                  />
+                  <label
+                    htmlFor="employee"
+                    className={`block p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                      watchSalesmanType === 'employee'
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                        : 'border-gray-300 dark:border-gray-600 hover:border-blue-300'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-3">
+                      <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                        watchSalesmanType === 'employee'
+                          ? 'border-blue-500 bg-blue-500'
+                          : 'border-gray-300'
+                      }`}>
+                        {watchSalesmanType === 'employee' && (
+                          <div className="w-2 h-2 rounded-full bg-white"></div>
+                        )}
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Users className="w-5 h-5 text-blue-600" />
+                        <span className="font-medium text-gray-900 dark:text-white">Employee</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 ml-7">
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        Traditional consignment model
+                      </p>
+                      <ul className="mt-2 text-xs text-gray-500 dark:text-gray-500 space-y-1">
+                        <li>• Products allocated on trust basis</li>
+                        <li>• Payment after sales are made</li>
+                        <li>• Company bears unsold stock risk</li>
+                        <li>• Settlement based on sales performance</li>
+                      </ul>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Agent Option */}
+                <div className="relative">
+                  <input
+                    {...register('salesman_type', { required: 'Salesman type is required' })}
+                    type="radio"
+                    value="agent"
+                    id="agent"
+                    className="sr-only"
+                  />
+                  <label
+                    htmlFor="agent"
+                    className={`block p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                      watchSalesmanType === 'agent'
+                        ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/20'
+                        : 'border-gray-300 dark:border-gray-600 hover:border-orange-300'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-3">
+                      <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                        watchSalesmanType === 'agent'
+                          ? 'border-orange-500 bg-orange-500'
+                          : 'border-gray-300'
+                      }`}>
+                        {watchSalesmanType === 'agent' && (
+                          <div className="w-2 h-2 rounded-full bg-white"></div>
+                        )}
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Package className="w-5 h-5 text-orange-600" />
+                        <span className="font-medium text-gray-900 dark:text-white">Agent</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 ml-7">
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        Direct purchase model
+                      </p>
+                      <ul className="mt-2 text-xs text-gray-500 dark:text-gray-500 space-y-1">
+                        <li>• Purchases products directly from owner</li>
+                        <li>• Immediate payment upon delivery</li>
+                        <li>• Agent bears unsold stock risk</li>
+                        <li>• Can return products for credit</li>
+                      </ul>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              {errors.salesman_type && (
+                <p className="mt-2 text-sm text-red-600">{errors.salesman_type.message}</p>
+              )}
             </div>
 
             {/* Salesman Information */}

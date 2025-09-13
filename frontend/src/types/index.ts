@@ -20,6 +20,10 @@ export interface Salesman {
   description?: string;
   profit_margin: number;
   is_active: boolean;
+  salesman_type: 'employee' | 'agent';
+  current_balance?: number;
+  total_cash_collected?: number;
+  total_cash_settled?: number;
   created_at: string;
   updated_at: string;
 }
@@ -223,6 +227,7 @@ export interface CreateSalesmanData {
   description?: string;
   profit_margin: number;
   is_active?: boolean;
+  salesman_type: 'employee' | 'agent';
 }
 
 export interface CreateProductData {
@@ -418,6 +423,7 @@ export interface Delivery {
   delivery_number?: string;
   salesman: number;
   salesman_name?: string;
+  salesman_type?: 'employee' | 'agent';  // Add salesman type
   delivery_date: string;
   status: string;
   settlement_date?: string;
@@ -432,6 +438,15 @@ export interface Delivery {
   created_at?: string;
   updated_at?: string;
   expenses?: DeliveryExpense[];
+  
+  // Agent-specific fields
+  agent_invoice?: {
+    id: number;
+    invoice_number: string;
+    total_amount: number;
+    status: string;
+  };
+  is_agent_delivery?: boolean;
 }
 
 export interface CreateDeliveryData {
@@ -873,4 +888,17 @@ export interface Commission {
   status: string;
   paid_date?: string;
   payment_reference?: string;
+}
+
+// Add agent balance update transaction type
+export interface AgentBalanceTransaction {
+  id: number;
+  transaction_type: 'advance' | 'collection' | 'settlement' | 'adjustment';
+  amount: number;
+  balance_before: number;
+  balance_after: number;
+  reference_type: string;
+  reference_id: string;
+  description: string;
+  created_at: string;
 }

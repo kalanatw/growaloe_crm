@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Layout } from '../components/Layout';
 import { LoadingSpinner } from '../components/LoadingSpinner';
 import { Plus } from 'lucide-react';
-import { deliveryService, salesmanService } from '../services/apiServices';
+import { deliveryService, salesmanService, agentService } from '../services/apiServices';
 import toast from 'react-hot-toast';
 import { useAuth } from '../contexts/AuthContext';
 import { CreateDeliveryModal } from '../components/CreateDeliveryModal';
@@ -11,6 +11,7 @@ import { SalesmanCashCollectionModal } from '../components/SalesmanCashCollectio
 import { SalesmanCentricView } from '../components/SalesmanCentricView';
 import { SalesmanDetailsModal } from '../components/SalesmanDetailsModal';
 import { SalesmanHistoryModal } from '../components/SalesmanHistoryModal';
+import { AgentCentricView } from '../components/AgentCentricView';
 
 export const DeliveriesPage: React.FC = () => {
   const { user } = useAuth();
@@ -32,6 +33,7 @@ export const DeliveriesPage: React.FC = () => {
   const [cashCollectionModal, setCashCollectionModal] = useState<any>(null);
   const [salesmanBalances, setSalesmanBalances] = useState<any>(null);
   const [cashCollectionAmounts, setCashCollectionAmounts] = useState<{ [key: number]: string }>({});
+  const [viewMode, setViewMode] = useState<'employees' | 'agents'>('employees');
 
   useEffect(() => {
     loadData();
@@ -78,10 +80,32 @@ export const DeliveriesPage: React.FC = () => {
 
   const handleCreateDelivery = async (deliveryData: any) => {
     try {
-      await deliveryService.createDelivery(deliveryData);
-      toast.success('Delivery created successfully!');
-      setIsCreateModalOpen(false);
-      loadData();
+      // Determine if this is an agent delivery based on the selected salesman
+      const selectedSalesman = salesmen.find(s => s.id === deliveryData.salesman);
+      const isAgentDelivery = selectedSalesman?.salesman_type === 'agent';
+      
+      let createdDelivery;
+      
+      if (isAgentDelivery) {
+        // Use agent delivery service for agents
+        createdDelivery = await deliveryService.createAgentDelivery({
+          ...deliveryData,
+          salesman_type: 'agent'
+        });
+        // Don't show toast here - let the modal handle it for agent deliveries
+      } else {
+        // Use regular delivery service for employees
+        createdDelivery = await deliveryService.createDelivery(deliveryData);
+        toast.success('Employee delivery created successfully!');
+        setIsCreateModalOpen(false);
+      }
+      
+      // Reload data after successful creation
+      await loadData();
+      await loadSalesmanBalances();
+      
+      // Return the created delivery for the modal to handle
+      return createdDelivery;
     } catch (error: any) {
       console.error('Error creating delivery:', error);
       toast.error(error.response?.data?.detail || 'Failed to create delivery');
@@ -151,6 +175,62 @@ export const DeliveriesPage: React.FC = () => {
     }
     loadData(); // Refresh data
     setCashCollectionModal(null);
+  };
+
+  // Agent-specific handlers
+  const handleProcessAgentPayment = async (agentId: number, deliveryId: number, paymentData: any) => {
+    try {
+      const result = await agentService.processAgentDeliveryPayment(agentId, {
+        delivery_id: deliveryId,
+        ...paymentData
+      });
+      toast.success(result.message);
+      loadData(); // Refresh data
+      return result;
+    } catch (error: any) {
+      console.error('Error processing agent payment:', error);
+      toast.error(error.response?.data?.error || 'Failed to process payment');
+      throw error;
+    }
+  };
+
+  const handleCreateAgentReturn = async (returnData: any) => {
+    try {
+      const result = await agentService.createAgentReturn(returnData);
+      toast.success('Agent return created successfully');
+      loadData(); // Refresh data
+      return result;
+    } catch (error: any) {
+      console.error('Error creating agent return:', error);
+      toast.error(error.response?.data?.error || 'Failed to create return');
+      throw error;
+    }
+  };
+
+  const handleApproveAgentReturn = async (returnId: number) => {
+    try {
+      const result = await agentService.approveAgentReturn(returnId);
+      toast.success(`Return ${result.return_number} approved. Agent balance updated.`);
+      loadData(); // Refresh data
+      return result;
+    } catch (error: any) {
+      console.error('Error approving agent return:', error);
+      toast.error(error.response?.data?.error || 'Failed to approve return');
+      throw error;
+    }
+  };
+
+  const handleRejectAgentReturn = async (returnId: number, reason: string) => {
+    try {
+      const result = await agentService.rejectAgentReturn(returnId, { rejection_reason: reason });
+      toast.success(`Return ${result.return_number} rejected`);
+      loadData(); // Refresh data
+      return result;
+    } catch (error: any) {
+      console.error('Error rejecting agent return:', error);
+      toast.error(error.response?.data?.error || 'Failed to reject return');
+      throw error;
+    }
   };
 
   const handleQuickCashCollection = async (salesman: any) => {
@@ -237,40 +317,77 @@ export const DeliveriesPage: React.FC = () => {
       <div className="space-y-6">
         <div className="flex justify-between items-center">
           <div>
-            {/* <h1 className="text-2xl font-bold text-gray-900">Delivery Management</h1> */}
-            <p className="text-gray-600">Manage deliveries and settlements by salesman</p>
+            <p className="text-gray-600">Manage deliveries and settlements by salesman type</p>
           </div>
-          {user?.role === 'owner' && (
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              className="btn btn-primary flex items-center space-x-2"
-            >
-              <Plus className="w-4 h-4" />
-              <span>New Delivery</span>
-            </button>
-          )}
+          <div className="flex items-center space-x-4">
+            {/* View Mode Toggle */}
+            <div className="flex items-center bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setViewMode('employees')}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                  viewMode === 'employees'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Employees
+              </button>
+              <button
+                onClick={() => setViewMode('agents')}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                  viewMode === 'agents'
+                    ? 'bg-orange-600 text-white shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Agents
+              </button>
+            </div>
+            
+            {user?.role === 'owner' && (
+              <button
+                onClick={() => setIsCreateModalOpen(true)}
+                className="btn btn-primary flex items-center space-x-2"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Delivery</span>
+              </button>
+            )}
+          </div>
         </div>
-        <SalesmanCentricView
-          salesmanOverview={salesmanOverview}
-          settlementQueue={settlementQueue}
-          dailySummary={dailySummary}
-          selectedView={selectedView}
-          setSelectedView={setSelectedView}
-          onViewSalesmanDetails={handleViewSalesmanDetails}
-          onSettleSalesman={(salesmanId: number) => {
-            const salesmanData = salesmanOverview?.salesmen?.find((s: any) => s.salesman_id === salesmanId);
-            if (salesmanData) {
-              setSettlementModalSalesman(salesmanData);
-            }
-          }}
-          isSettling={isSettling}
-          onShowHistory={handleShowHistoryModal}
-          salesmanBalances={salesmanBalances}
-          cashCollectionAmounts={cashCollectionAmounts}
-          setCashCollectionAmounts={setCashCollectionAmounts}
-          onQuickCashCollection={handleQuickCashCollection}
-          onShowCashCollection={setCashCollectionModal}
-        />
+        
+        {/* Conditional rendering based on view mode */}
+        {viewMode === 'employees' ? (
+          <SalesmanCentricView
+            salesmanOverview={salesmanOverview}
+            settlementQueue={settlementQueue}
+            dailySummary={dailySummary}
+            selectedView={selectedView}
+            setSelectedView={setSelectedView}
+            onViewSalesmanDetails={handleViewSalesmanDetails}
+            onSettleSalesman={(salesmanId: number) => {
+              const salesmanData = salesmanOverview?.salesmen?.find((s: any) => s.salesman_id === salesmanId);
+              if (salesmanData) {
+                setSettlementModalSalesman(salesmanData);
+              }
+            }}
+            isSettling={isSettling}
+            onShowHistory={handleShowHistoryModal}
+            salesmanBalances={salesmanBalances}
+            cashCollectionAmounts={cashCollectionAmounts}
+            setCashCollectionAmounts={setCashCollectionAmounts}
+            onQuickCashCollection={handleQuickCashCollection}
+            onShowCashCollection={setCashCollectionModal}
+          />
+        ) : (
+          <AgentCentricView
+            agents={salesmen.filter(s => s.salesman_type === 'agent')}
+            onProcessPayment={handleProcessAgentPayment}
+            onCreateReturn={handleCreateAgentReturn}
+            onApproveReturn={handleApproveAgentReturn}
+            onRejectReturn={handleRejectAgentReturn}
+          />
+        )}
         {isCreateModalOpen && (
           <CreateDeliveryModal
             isOpen={isCreateModalOpen}
